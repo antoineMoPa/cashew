@@ -93,6 +93,8 @@ impl Sheet {
     }
 
     pub fn set_cell_input(&mut self, row: usize, col: usize, input: String) {
+        self.ensure_size(row + 1, col + 1);
+
         let value = if input.trim().is_empty() {
             CellValue::Empty
         } else if input.trim_start().starts_with('=') {
@@ -123,6 +125,7 @@ impl Sheet {
     }
 
     pub fn set_column_width(&mut self, col: usize, width: u16) {
+        self.ensure_size(self.rows, col + 1);
         self.column_widths.insert(col.to_string(), width);
     }
 
@@ -134,7 +137,13 @@ impl Sheet {
     }
 
     pub fn set_row_height(&mut self, row: usize, height: u16) {
+        self.ensure_size(row + 1, self.cols);
         self.row_heights.insert(row.to_string(), height);
+    }
+
+    pub fn ensure_size(&mut self, rows: usize, cols: usize) {
+        self.rows = self.rows.max(rows);
+        self.cols = self.cols.max(cols);
     }
 }
 
