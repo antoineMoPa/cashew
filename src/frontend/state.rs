@@ -91,8 +91,7 @@ impl AppState {
     }
 
     pub(crate) fn select_or_insert_cell_reference(&mut self, row: usize, col: usize) {
-        if formula_accepts_cell_reference(&self.formula_input) && self.selected_cell != (row, col)
-        {
+        if formula_accepts_cell_reference(&self.formula_input) && self.selected_cell != (row, col) {
             self.insert_cell_reference(row, col);
         } else {
             self.set_selected_cell(row, col);
@@ -218,7 +217,6 @@ impl AppState {
             sheet.ensure_size(rows.max(MIN_VISIBLE_ROWS), cols.max(MIN_VISIBLE_COLS));
         }
     }
-
 }
 
 fn cell_input(document: &CashewDocument, row: usize, col: usize) -> String {
