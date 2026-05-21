@@ -43,10 +43,63 @@ pub(crate) fn MenuBar(mut state: Signal<AppState>) -> Element {
                             div { class: "menu-separator" }
                             button { class: "menu-item", onclick: move |_| state.with_mut(AppState::save_document), "Save" }
                             button { class: "menu-item", onclick: move |_| state.with_mut(AppState::save_document_as), "Save As..." }
+                            div { class: "menu-separator" }
+                            button { class: "menu-item", onclick: move |_| state.with_mut(AppState::open_settings), "Settings..." }
                         }
                     }
                 }
                 button { class: "menu-trigger disabled", "Edit" }
+            }
+        }
+    }
+}
+
+#[component]
+pub(crate) fn SettingsDialog(mut state: Signal<AppState>) -> Element {
+    let snapshot = state.read();
+    let open = snapshot.settings_open;
+    let fal_key = snapshot.settings_fal_key.clone();
+    let path = snapshot
+        .settings_path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "$HOME/.cashewai/settings.json".to_string());
+    drop(snapshot);
+
+    if !open {
+        return rsx! {};
+    }
+
+    rsx! {
+        div { class: "modal-backdrop",
+            div { class: "settings-dialog",
+                div { class: "settings-title", "Settings" }
+                label { class: "settings-field",
+                    span { "FAL key" }
+                    input {
+                        class: "settings-input",
+                        r#type: "password",
+                        value: "{fal_key}",
+                        placeholder: "fal key",
+                        oninput: move |event| {
+                            let value = event.value();
+                            state.with_mut(|state| state.set_settings_fal_key(value));
+                        }
+                    }
+                }
+                div { class: "settings-path", "{path}" }
+                div { class: "settings-actions",
+                    button {
+                        class: "dialog-button secondary",
+                        onclick: move |_| state.with_mut(AppState::close_settings),
+                        "Cancel"
+                    }
+                    button {
+                        class: "dialog-button primary",
+                        onclick: move |_| state.with_mut(AppState::save_settings),
+                        "Save"
+                    }
+                }
             }
         }
     }

@@ -60,12 +60,12 @@ pub const FORMULA_FUNCTIONS: &[FormulaFunction] = &[
     },
     FormulaFunction {
         name: "LLM",
-        signature: "LLM(prompt, context)",
-        insert_text: "=LLM(prompt, context)",
-        summary: "Generate or transform text with a language model.",
-        details: "No-op for now. Later, resolved prompt and context inputs will determine the cache key before any provider call.",
+        signature: "LLM(prompt, model, system_prompt)",
+        insert_text: "=LLM(prompt, \"google/gemini-2.5-flash\", system_prompt)",
+        summary: "Generate or transform text through fal OpenRouter.",
+        details: "Set up for fal endpoint openrouter/router. No-op in cell evaluation until async provider execution and cache writes are wired.",
         implementation: FormulaImplementation::NoopAi {
-            placeholder: "LLM generation is not implemented yet.",
+            placeholder: "LLM via fal OpenRouter is configured but execution is not wired yet.",
         },
     },
     FormulaFunction {

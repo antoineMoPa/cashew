@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use crate::backend::document::{CashewDocument, cell_key, column_name};
 use crate::backend::formulas::FormulaFunction;
+use crate::backend::settings::{UserSettings, settings_path};
 
 const MIN_COLUMN_WIDTH: i32 = 72;
 const MAX_COLUMN_WIDTH: i32 = 520;
@@ -24,6 +25,9 @@ pub(crate) struct AppState {
     pub(crate) formula_input: String,
     pub(crate) resizing: Option<ResizeDrag>,
     pub(crate) completions_open: bool,
+    pub(crate) settings_open: bool,
+    pub(crate) settings_fal_key: String,
+    pub(crate) settings_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -47,17 +51,21 @@ impl AppState {
             sheet.ensure_size(MIN_VISIBLE_ROWS, MIN_VISIBLE_COLS);
         }
         let formula_input = cell_input(&document, 0, 0);
+        let (settings_fal_key, settings_path, settings_status) = load_settings_for_ui();
 
         Self {
             document,
             file_path: None,
             file_menu_open: false,
             dirty: false,
-            status: "Ready".to_string(),
+            status: settings_status.unwrap_or_else(|| "Ready".to_string()),
             selected_cell: (0, 0),
             formula_input,
             resizing: None,
             completions_open: false,
+            settings_open: false,
+            settings_fal_key,
+            settings_path,
         }
     }
 
@@ -176,6 +184,47 @@ impl AppState {
         self.write_document(path);
     }
 
+    pub(crate) fn open_settings(&mut self) {
+        self.file_menu_open = false;
+        self.settings_open = true;
+
+        match UserSettings::load_default() {
+            Ok(settings) => {
+                self.settings_fal_key = settings.fal_key.unwrap_or_default();
+                self.settings_path = settings_path().ok();
+            }
+            Err(error) => {
+                self.status = error.to_string();
+            }
+        }
+    }
+
+    pub(crate) fn close_settings(&mut self) {
+        self.settings_open = false;
+    }
+
+    pub(crate) fn set_settings_fal_key(&mut self, value: String) {
+        self.settings_fal_key = value;
+    }
+
+    pub(crate) fn save_settings(&mut self) {
+        let fal_key = match self.settings_fal_key.trim() {
+            "" => None,
+            key => Some(key.to_string()),
+        };
+
+        match (UserSettings { fal_key }).save_default() {
+            Ok(path) => {
+                self.settings_path = Some(path.clone());
+                self.settings_open = false;
+                self.status = format!("Saved settings to {}", path.display());
+            }
+            Err(error) => {
+                self.status = error.to_string();
+            }
+        }
+    }
+
     pub(crate) fn update_resize(&mut self, coordinate: i32) {
         let Some(resizing) = self.resizing else {
             return;
@@ -225,6 +274,18 @@ fn cell_input(document: &CashewDocument, row: usize, col: usize) -> String {
         .and_then(|sheet| sheet.cell(row, col))
         .map(|cell| cell.input.clone())
         .unwrap_or_default()
+}
+
+fn load_settings_for_ui() -> (String, Option<PathBuf>, Option<String>) {
+    let path = settings_path().ok();
+    match UserSettings::load_default() {
+        Ok(settings) => (settings.fal_key.unwrap_or_default(), path, None),
+        Err(error) => (
+            String::new(),
+            path,
+            Some(format!("Could not load settings: {error}")),
+        ),
+    }
 }
 
 pub(crate) fn should_show_completions(input: &str) -> bool {

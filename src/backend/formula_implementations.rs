@@ -418,7 +418,7 @@ mod tests {
         assert_eq!(
             evaluate_formula("=LLM(A1, A2)"),
             Ok(FormulaValue::Pending(
-                "LLM generation is not implemented yet.".to_string()
+                "LLM via fal OpenRouter is configured but execution is not wired yet.".to_string()
             ))
         );
     }
