@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::backend::document::{CashewDocument, cell_key};
+use crate::backend::document::{CashewDocument, cell_key, column_name};
 use crate::backend::formulas::FormulaFunction;
 
 const MIN_COLUMN_WIDTH: i32 = 72;
@@ -88,6 +88,23 @@ impl AppState {
         self.completions_open = should_show_completions(&value);
         self.formula_input = value.clone();
         self.set_cell_input(row, col, value);
+    }
+
+    pub(crate) fn select_or_insert_cell_reference(&mut self, row: usize, col: usize) {
+        if formula_accepts_cell_reference(&self.formula_input) && self.selected_cell != (row, col)
+        {
+            self.insert_cell_reference(row, col);
+        } else {
+            self.set_selected_cell(row, col);
+        }
+    }
+
+    pub(crate) fn insert_cell_reference(&mut self, row: usize, col: usize) {
+        let reference = absolute_column_reference(row, col);
+        let separator = formula_reference_separator(&self.formula_input);
+        let formula = format!("{}{}{}", self.formula_input, separator, reference);
+        self.set_selected_formula(formula);
+        self.completions_open = false;
     }
 
     pub(crate) fn insert_formula(&mut self, function: FormulaFunction) {
@@ -201,6 +218,7 @@ impl AppState {
             sheet.ensure_size(rows.max(MIN_VISIBLE_ROWS), cols.max(MIN_VISIBLE_COLS));
         }
     }
+
 }
 
 fn cell_input(document: &CashewDocument, row: usize, col: usize) -> String {
@@ -214,4 +232,55 @@ fn cell_input(document: &CashewDocument, row: usize, col: usize) -> String {
 pub(crate) fn should_show_completions(input: &str) -> bool {
     let trimmed = input.trim_start();
     trimmed.starts_with('=') && !trimmed.contains('(')
+}
+
+fn absolute_column_reference(row: usize, col: usize) -> String {
+    format!("${}{}", column_name(col), row + 1)
+}
+
+fn formula_reference_separator(input: &str) -> &'static str {
+    let trimmed = input.trim_end();
+
+    if trimmed.ends_with('=')
+        || trimmed.ends_with('(')
+        || trimmed.ends_with(',')
+        || trimmed.ends_with('+')
+        || trimmed.ends_with('-')
+        || trimmed.ends_with('*')
+        || trimmed.ends_with('/')
+        || trimmed.is_empty()
+    {
+        ""
+    } else {
+        "+"
+    }
+}
+
+fn formula_accepts_cell_reference(input: &str) -> bool {
+    let trimmed = input.trim_end();
+
+    trimmed.starts_with('=')
+        && (trimmed.ends_with('=')
+            || trimmed.ends_with('(')
+            || trimmed.ends_with(',')
+            || trimmed.ends_with('+')
+            || trimmed.ends_with('-')
+            || trimmed.ends_with('*')
+            || trimmed.ends_with('/'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formula_reference_insertion_only_captures_operand_positions() {
+        assert!(formula_accepts_cell_reference("="));
+        assert!(formula_accepts_cell_reference("=A1+"));
+        assert!(formula_accepts_cell_reference("=SUM("));
+
+        assert!(!formula_accepts_cell_reference("=$A1"));
+        assert!(!formula_accepts_cell_reference("=1+1"));
+        assert!(!formula_accepts_cell_reference("plain text"));
+    }
 }

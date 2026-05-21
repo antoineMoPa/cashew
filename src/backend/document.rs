@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     cache::CacheEntry,
-    formulas::{FormulaValue, evaluate_formula, format_number},
+    formula_implementations::{FormulaValue, evaluate_formula_for_sheet, format_number},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -101,7 +101,7 @@ impl Sheet {
         let value = if input.trim().is_empty() {
             CellValue::Empty
         } else if input.trim_start().starts_with('=') {
-            match evaluate_formula(&input) {
+            match evaluate_formula_for_sheet(&input, self) {
                 Ok(FormulaValue::Number(number)) => CellValue::Text(format_number(number)),
                 Ok(FormulaValue::Pending(message)) => CellValue::FormulaPending { message },
                 Err(error) => CellValue::Error(error),
@@ -207,5 +207,18 @@ mod tests {
         assert_eq!(column_name(0), "A");
         assert_eq!(column_name(25), "Z");
         assert_eq!(column_name(26), "AA");
+    }
+
+    #[test]
+    fn formulas_can_use_cell_references() {
+        let mut sheet = Sheet::new("Math", 2, 2);
+        sheet.set_cell_input(0, 0, "2".to_string());
+        sheet.set_cell_input(0, 1, "3".to_string());
+        sheet.set_cell_input(1, 0, "=$A1+B1".to_string());
+
+        assert_eq!(
+            sheet.cell(1, 0).map(|cell| &cell.value),
+            Some(&CellValue::Text("5".to_string()))
+        );
     }
 }

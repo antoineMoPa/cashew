@@ -1,4 +1,7 @@
-use super::formulas::{FormulaImplementation, FormulaValue, MathFunction, FORMULA_FUNCTIONS};
+use super::{
+    document::{CellValue, Sheet},
+    formulas::{FORMULA_FUNCTIONS, FormulaImplementation, MathFunction},
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FormulaValue {
@@ -7,6 +10,14 @@ pub enum FormulaValue {
 }
 
 pub fn evaluate_formula(input: &str) -> Result<FormulaValue, String> {
+    evaluate_formula_with_sheet(input, None)
+}
+
+pub fn evaluate_formula_for_sheet(input: &str, sheet: &Sheet) -> Result<FormulaValue, String> {
+    evaluate_formula_with_sheet(input, Some(sheet))
+}
+
+fn evaluate_formula_with_sheet(input: &str, sheet: Option<&Sheet>) -> Result<FormulaValue, String> {
     let expression = input
         .trim_start()
         .strip_prefix('=')
@@ -28,13 +39,13 @@ pub fn evaluate_formula(input: &str) -> Result<FormulaValue, String> {
                 Ok(FormulaValue::Pending(placeholder.to_string()))
             }
             FormulaImplementation::Math(math) => {
-                let values = parse_numeric_arguments(args)?;
+                let values = parse_numeric_arguments(args, sheet)?;
                 evaluate_math_function(math, &values)
             }
         };
     }
 
-    ExpressionParser::new(expression)
+    ExpressionParser::new(expression, sheet)
         .parse()
         .map(FormulaValue::Number)
 }
@@ -67,13 +78,13 @@ fn is_function_name(name: &str) -> bool {
         && chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
-fn parse_numeric_arguments(args: &str) -> Result<Vec<f64>, String> {
+fn parse_numeric_arguments(args: &str, sheet: Option<&Sheet>) -> Result<Vec<f64>, String> {
     if args.trim().is_empty() {
         return Ok(Vec::new());
     }
 
     args.split(',')
-        .map(|arg| ExpressionParser::new(arg.trim()).parse())
+        .map(|arg| ExpressionParser::new(arg.trim(), sheet).parse())
         .collect()
 }
 
@@ -132,11 +143,16 @@ fn evaluate_math_function(function: MathFunction, args: &[f64]) -> Result<Formul
 struct ExpressionParser<'a> {
     input: &'a str,
     position: usize,
+    sheet: Option<&'a Sheet>,
 }
 
 impl<'a> ExpressionParser<'a> {
-    fn new(input: &'a str) -> Self {
-        Self { input, position: 0 }
+    fn new(input: &'a str, sheet: Option<&'a Sheet>) -> Self {
+        Self {
+            input,
+            position: 0,
+            sheet,
+        }
     }
 
     fn parse(mut self) -> Result<f64, String> {
@@ -203,6 +219,13 @@ impl<'a> ExpressionParser<'a> {
             return Ok(-self.parse_factor()?);
         }
 
+        if self
+            .peek()
+            .is_some_and(|character| character == '$' || character.is_ascii_alphabetic())
+        {
+            return self.parse_cell_reference();
+        }
+
         self.parse_number()
     }
 
@@ -227,6 +250,62 @@ impl<'a> ExpressionParser<'a> {
             .map_err(|_| "Invalid number".to_string())
     }
 
+    fn parse_cell_reference(&mut self) -> Result<f64, String> {
+        let start = self.position;
+        self.consume('$');
+
+        let column_start = self.position;
+        while let Some(character) = self.peek() {
+            if character.is_ascii_alphabetic() {
+                self.position += character.len_utf8();
+            } else {
+                break;
+            }
+        }
+
+        if column_start == self.position {
+            self.position = start;
+            return self.parse_number();
+        }
+
+        self.consume('$');
+
+        let row_start = self.position;
+        while let Some(character) = self.peek() {
+            if character.is_ascii_digit() {
+                self.position += character.len_utf8();
+            } else {
+                break;
+            }
+        }
+
+        if row_start == self.position {
+            return Err("Cell reference is missing a row number".to_string());
+        }
+
+        let reference = &self.input[start..self.position];
+        let (row, col) = parse_cell_reference(reference)?;
+        let Some(sheet) = self.sheet else {
+            return Err(format!("Cannot resolve cell reference {reference}"));
+        };
+
+        match sheet.cell(row, col).map(|cell| &cell.value) {
+            Some(CellValue::Text(value)) => value
+                .trim()
+                .parse()
+                .map_err(|_| format!("{reference} does not contain a number")),
+            Some(CellValue::Empty) | None => Ok(0.0),
+            Some(CellValue::FormulaPending { .. }) => Err(format!(
+                "{reference} is pending and cannot be used as a number"
+            )),
+            Some(CellValue::Cached(value)) => value
+                .trim()
+                .parse()
+                .map_err(|_| format!("{reference} does not contain a number")),
+            Some(CellValue::Error(error)) => Err(format!("{reference} has an error: {error}")),
+        }
+    }
+
     fn consume(&mut self, expected: char) -> bool {
         if self.peek() == Some(expected) {
             self.position += expected.len_utf8();
@@ -249,6 +328,48 @@ impl<'a> ExpressionParser<'a> {
             }
         }
     }
+}
+
+pub fn parse_cell_reference(reference: &str) -> Result<(usize, usize), String> {
+    let mut chars = reference.trim().chars().peekable();
+
+    if chars.peek() == Some(&'$') {
+        chars.next();
+    }
+
+    let mut col = 0usize;
+    let mut saw_column = false;
+    while let Some(character) = chars.peek().copied() {
+        if character.is_ascii_alphabetic() {
+            saw_column = true;
+            col = col * 26 + (character.to_ascii_uppercase() as u8 - b'A' + 1) as usize;
+            chars.next();
+        } else {
+            break;
+        }
+    }
+
+    if !saw_column {
+        return Err("Cell reference is missing a column".to_string());
+    }
+
+    if chars.peek() == Some(&'$') {
+        chars.next();
+    }
+
+    let row_text = chars.collect::<String>();
+    if row_text.is_empty() || !row_text.chars().all(|character| character.is_ascii_digit()) {
+        return Err("Cell reference is missing a row number".to_string());
+    }
+
+    let row = row_text
+        .parse::<usize>()
+        .map_err(|_| "Cell row is invalid".to_string())?;
+    if row == 0 {
+        return Err("Cell row must be 1 or greater".to_string());
+    }
+
+    Ok((row - 1, col - 1))
 }
 
 pub fn format_number(value: f64) -> String {
@@ -300,5 +421,12 @@ mod tests {
                 "LLM generation is not implemented yet.".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn parses_absolute_cell_references() {
+        assert_eq!(parse_cell_reference("$A1"), Ok((0, 0)));
+        assert_eq!(parse_cell_reference("B$12"), Ok((11, 1)));
+        assert_eq!(parse_cell_reference("$AA10"), Ok((9, 26)));
     }
 }

@@ -258,8 +258,9 @@ fn CellEditor(
             class,
             style,
             value: "{value}",
-            onfocus: move |_| state.with_mut(|state| state.set_selected_cell(row, col)),
-            onclick: move |_| state.with_mut(|state| state.set_selected_cell(row, col)),
+            onfocus: move |_| {
+                state.with_mut(|state| state.select_or_insert_cell_reference(row, col));
+            },
             oninput: move |event| {
                 let value = event.value();
                 state.with_mut(|state| state.set_cell_input(row, col, value));
