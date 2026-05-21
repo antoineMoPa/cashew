@@ -33,41 +33,6 @@ input {
     background: #f8fafd;
 }
 
-.title-strip {
-    height: 36px;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 0 10px;
-}
-
-.brand {
-    width: 28px;
-    height: 28px;
-    display: grid;
-    place-items: center;
-    border-radius: 4px;
-    background: #188038;
-    color: #fff;
-    font-size: 13px;
-    font-weight: 700;
-}
-
-.document-title {
-    min-width: 160px;
-    font-size: 15px;
-    font-weight: 500;
-}
-
-.document-path {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: #5f6368;
-    font-size: 12px;
-}
-
 .menu-bar {
     height: 28px;
     display: flex;

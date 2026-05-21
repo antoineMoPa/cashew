@@ -10,7 +10,8 @@ pub enum FormulaValue {
     Pending(String),
 }
 
-pub fn evaluate_formula(input: &str) -> Result<FormulaValue, String> {
+#[cfg(test)]
+fn evaluate_formula(input: &str) -> Result<FormulaValue, String> {
     evaluate_formula_with_sheet(input, None)
 }
 

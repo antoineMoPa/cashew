@@ -11,24 +11,11 @@ use super::state::{
 #[component]
 pub(crate) fn MenuBar(mut state: Signal<AppState>) -> Element {
     let snapshot = state.read();
-    let title = snapshot.document.title.clone();
-    let dirty = snapshot.dirty;
-    let title_text = if dirty { format!("{title} *") } else { title };
-    let path = snapshot
-        .file_path
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "Unsaved JSON document".to_string());
     let file_menu_open = snapshot.file_menu_open;
     drop(snapshot);
 
     rsx! {
         header { class: "top-shell",
-            div { class: "title-strip",
-                div { class: "brand", "Cashew" }
-                div { class: "document-title", "{title_text}" }
-                div { class: "document-path", "{path}" }
-            }
             nav { class: "menu-bar",
                 div { class: "menu-root",
                     button {
