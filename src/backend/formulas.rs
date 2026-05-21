@@ -5,6 +5,32 @@ pub struct FormulaFunction {
     pub insert_text: &'static str,
     pub summary: &'static str,
     pub details: &'static str,
+    pub implementation: FormulaImplementation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormulaImplementation {
+    NoopAi { placeholder: &'static str },
+    Math(MathFunction),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MathFunction {
+    Sum,
+    Product,
+    Average,
+    Min,
+    Max,
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FormulaValue {
+    Number(f64),
+    Pending(String),
 }
 
 pub const FORMULA_FUNCTIONS: &[FormulaFunction] = &[
@@ -13,35 +39,112 @@ pub const FORMULA_FUNCTIONS: &[FormulaFunction] = &[
         signature: "GENERATEIMAGE(prompt, reference)",
         insert_text: "=GENERATEIMAGE(prompt, reference)",
         summary: "Generate or reuse an image from prompt inputs.",
-        details: "Planned cached media formula. The resolved prompt and reference inputs will determine the cache key before any provider call.",
+        details: "No-op for now. Later, resolved prompt and reference inputs will determine the cache key before any provider call.",
+        implementation: FormulaImplementation::NoopAi {
+            placeholder: "AI image generation is not implemented yet.",
+        },
     },
     FormulaFunction {
         name: "GENERATEVIDEO",
         signature: "GENERATEVIDEO(prompt, image, settings)",
         insert_text: "=GENERATEVIDEO(prompt, image, settings)",
         summary: "Generate or reuse a video clip from prompt and media inputs.",
-        details: "Planned cached media formula for storyboard-to-video workflows. Provider execution is not implemented yet.",
+        details: "No-op for now. Later, this will support cached storyboard-to-video workflows.",
+        implementation: FormulaImplementation::NoopAi {
+            placeholder: "AI video generation is not implemented yet.",
+        },
     },
     FormulaFunction {
         name: "CONCATENATEVIDEO",
         signature: "CONCATENATEVIDEO(video_range)",
         insert_text: "=CONCATENATEVIDEO(video_range)",
         summary: "Concatenate generated clips into a longer video.",
-        details: "Planned cached composition formula for assembling scenes or complete drafts from generated clips.",
+        details: "No-op for now. Later, this will assemble cached clips into scenes or complete drafts.",
+        implementation: FormulaImplementation::NoopAi {
+            placeholder: "Video concatenation is not implemented yet.",
+        },
     },
     FormulaFunction {
-        name: "PROMPT",
-        signature: "PROMPT(instruction, source)",
-        insert_text: "=PROMPT(instruction, source)",
-        summary: "Transform prompt text with an instruction.",
-        details: "Planned helper formula for prompt wrangling before media generation.",
+        name: "LLM",
+        signature: "LLM(prompt, context)",
+        insert_text: "=LLM(prompt, context)",
+        summary: "Generate or transform text with a language model.",
+        details: "No-op for now. Later, resolved prompt and context inputs will determine the cache key before any provider call.",
+        implementation: FormulaImplementation::NoopAi {
+            placeholder: "LLM generation is not implemented yet.",
+        },
     },
     FormulaFunction {
-        name: "STORYBOARD",
-        signature: "STORYBOARD(scenario, style)",
-        insert_text: "=STORYBOARD(scenario, style)",
-        summary: "Draft storyboard beats from a scenario and style guide.",
-        details: "Planned helper formula for turning scenario text into shot-level rows.",
+        name: "SUM",
+        signature: "SUM(number, ...)",
+        insert_text: "=SUM(number, ...)",
+        summary: "Add numbers together.",
+        details: "Currently supports numeric literal arguments only. Cell references and ranges will come later.",
+        implementation: FormulaImplementation::Math(MathFunction::Sum),
+    },
+    FormulaFunction {
+        name: "PRODUCT",
+        signature: "PRODUCT(number, ...)",
+        insert_text: "=PRODUCT(number, ...)",
+        summary: "Multiply numbers together.",
+        details: "Currently supports numeric literal arguments only.",
+        implementation: FormulaImplementation::Math(MathFunction::Product),
+    },
+    FormulaFunction {
+        name: "AVERAGE",
+        signature: "AVERAGE(number, ...)",
+        insert_text: "=AVERAGE(number, ...)",
+        summary: "Average numbers.",
+        details: "Currently supports numeric literal arguments only.",
+        implementation: FormulaImplementation::Math(MathFunction::Average),
+    },
+    FormulaFunction {
+        name: "MIN",
+        signature: "MIN(number, ...)",
+        insert_text: "=MIN(number, ...)",
+        summary: "Return the smallest number.",
+        details: "Currently supports numeric literal arguments only.",
+        implementation: FormulaImplementation::Math(MathFunction::Min),
+    },
+    FormulaFunction {
+        name: "MAX",
+        signature: "MAX(number, ...)",
+        insert_text: "=MAX(number, ...)",
+        summary: "Return the largest number.",
+        details: "Currently supports numeric literal arguments only.",
+        implementation: FormulaImplementation::Math(MathFunction::Max),
+    },
+    FormulaFunction {
+        name: "ADD",
+        signature: "ADD(left, right)",
+        insert_text: "=ADD(left, right)",
+        summary: "Add two numbers.",
+        details: "Equivalent to the + operator for numeric literals.",
+        implementation: FormulaImplementation::Math(MathFunction::Add),
+    },
+    FormulaFunction {
+        name: "SUBTRACT",
+        signature: "SUBTRACT(left, right)",
+        insert_text: "=SUBTRACT(left, right)",
+        summary: "Subtract one number from another.",
+        details: "Equivalent to the - operator for numeric literals.",
+        implementation: FormulaImplementation::Math(MathFunction::Subtract),
+    },
+    FormulaFunction {
+        name: "MULTIPLY",
+        signature: "MULTIPLY(left, right)",
+        insert_text: "=MULTIPLY(left, right)",
+        summary: "Multiply two numbers.",
+        details: "Equivalent to the * operator for numeric literals.",
+        implementation: FormulaImplementation::Math(MathFunction::Multiply),
+    },
+    FormulaFunction {
+        name: "DIVIDE",
+        signature: "DIVIDE(left, right)",
+        insert_text: "=DIVIDE(left, right)",
+        summary: "Divide one number by another.",
+        details: "Equivalent to the / operator for numeric literals.",
+        implementation: FormulaImplementation::Math(MathFunction::Divide),
     },
 ];
 
@@ -57,6 +160,39 @@ pub fn matching_functions(input: &str) -> Vec<FormulaFunction> {
         .collect()
 }
 
+pub fn evaluate_formula(input: &str) -> Result<FormulaValue, String> {
+    let expression = input
+        .trim_start()
+        .strip_prefix('=')
+        .ok_or_else(|| "Formula must start with =".to_string())?
+        .trim();
+
+    if expression.is_empty() {
+        return Err("Formula is empty".to_string());
+    }
+
+    if let Some((name, args)) = parse_function_call(expression)? {
+        let function = FORMULA_FUNCTIONS
+            .iter()
+            .find(|function| function.name.eq_ignore_ascii_case(&name))
+            .ok_or_else(|| format!("Unknown function {name}"))?;
+
+        return match function.implementation {
+            FormulaImplementation::NoopAi { placeholder } => {
+                Ok(FormulaValue::Pending(placeholder.to_string()))
+            }
+            FormulaImplementation::Math(math) => {
+                let values = parse_numeric_arguments(args)?;
+                evaluate_math_function(math, &values)
+            }
+        };
+    }
+
+    ExpressionParser::new(expression)
+        .parse()
+        .map(FormulaValue::Number)
+}
+
 fn formula_query(input: &str) -> Option<String> {
     let trimmed = input.trim_start();
     let query = trimmed.strip_prefix('=')?;
@@ -66,4 +202,286 @@ fn formula_query(input: &str) -> Option<String> {
     }
 
     Some(query.trim().to_ascii_uppercase())
+}
+
+fn parse_function_call(expression: &str) -> Result<Option<(String, &str)>, String> {
+    let Some(open) = expression.find('(') else {
+        return Ok(None);
+    };
+
+    let name = expression[..open].trim();
+    if !is_function_name(name) {
+        return Ok(None);
+    }
+
+    if !expression.ends_with(')') {
+        return Err("Function call is missing a closing parenthesis".to_string());
+    }
+
+    let args = &expression[open + 1..expression.len() - 1];
+    Ok(Some((name.to_ascii_uppercase(), args)))
+}
+
+fn is_function_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+
+    first.is_ascii_alphabetic()
+        && chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
+fn parse_numeric_arguments(args: &str) -> Result<Vec<f64>, String> {
+    if args.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    args.split(',')
+        .map(|arg| ExpressionParser::new(arg.trim()).parse())
+        .collect()
+}
+
+fn evaluate_math_function(function: MathFunction, args: &[f64]) -> Result<FormulaValue, String> {
+    let require_count = |count: usize| {
+        if args.len() == count {
+            Ok(())
+        } else {
+            Err(format!("Expected {count} arguments, got {}", args.len()))
+        }
+    };
+
+    let number = match function {
+        MathFunction::Sum => args.iter().sum(),
+        MathFunction::Product => args.iter().product(),
+        MathFunction::Average => {
+            if args.is_empty() {
+                return Err("AVERAGE requires at least one argument".to_string());
+            }
+            args.iter().sum::<f64>() / args.len() as f64
+        }
+        MathFunction::Min => args
+            .iter()
+            .copied()
+            .reduce(f64::min)
+            .ok_or_else(|| "MIN requires at least one argument".to_string())?,
+        MathFunction::Max => args
+            .iter()
+            .copied()
+            .reduce(f64::max)
+            .ok_or_else(|| "MAX requires at least one argument".to_string())?,
+        MathFunction::Add => {
+            require_count(2)?;
+            args[0] + args[1]
+        }
+        MathFunction::Subtract => {
+            require_count(2)?;
+            args[0] - args[1]
+        }
+        MathFunction::Multiply => {
+            require_count(2)?;
+            args[0] * args[1]
+        }
+        MathFunction::Divide => {
+            require_count(2)?;
+            if args[1] == 0.0 {
+                return Err("Cannot divide by zero".to_string());
+            }
+            args[0] / args[1]
+        }
+    };
+
+    Ok(FormulaValue::Number(number))
+}
+
+struct ExpressionParser<'a> {
+    input: &'a str,
+    position: usize,
+}
+
+impl<'a> ExpressionParser<'a> {
+    fn new(input: &'a str) -> Self {
+        Self { input, position: 0 }
+    }
+
+    fn parse(mut self) -> Result<f64, String> {
+        let value = self.parse_expression()?;
+        self.skip_whitespace();
+
+        if self.position == self.input.len() {
+            Ok(value)
+        } else {
+            Err(format!(
+                "Unexpected token near {}",
+                &self.input[self.position..]
+            ))
+        }
+    }
+
+    fn parse_expression(&mut self) -> Result<f64, String> {
+        let mut value = self.parse_term()?;
+
+        loop {
+            self.skip_whitespace();
+            if self.consume('+') {
+                value += self.parse_term()?;
+            } else if self.consume('-') {
+                value -= self.parse_term()?;
+            } else {
+                return Ok(value);
+            }
+        }
+    }
+
+    fn parse_term(&mut self) -> Result<f64, String> {
+        let mut value = self.parse_factor()?;
+
+        loop {
+            self.skip_whitespace();
+            if self.consume('*') {
+                value *= self.parse_factor()?;
+            } else if self.consume('/') {
+                let divisor = self.parse_factor()?;
+                if divisor == 0.0 {
+                    return Err("Cannot divide by zero".to_string());
+                }
+                value /= divisor;
+            } else {
+                return Ok(value);
+            }
+        }
+    }
+
+    fn parse_factor(&mut self) -> Result<f64, String> {
+        self.skip_whitespace();
+
+        if self.consume('(') {
+            let value = self.parse_expression()?;
+            self.skip_whitespace();
+            if !self.consume(')') {
+                return Err("Expected closing parenthesis".to_string());
+            }
+            return Ok(value);
+        }
+
+        if self.consume('-') {
+            return Ok(-self.parse_factor()?);
+        }
+
+        self.parse_number()
+    }
+
+    fn parse_number(&mut self) -> Result<f64, String> {
+        self.skip_whitespace();
+        let start = self.position;
+
+        while let Some(character) = self.peek() {
+            if character.is_ascii_digit() || character == '.' {
+                self.position += character.len_utf8();
+            } else {
+                break;
+            }
+        }
+
+        if start == self.position {
+            return Err("Expected a number".to_string());
+        }
+
+        self.input[start..self.position]
+            .parse()
+            .map_err(|_| "Invalid number".to_string())
+    }
+
+    fn consume(&mut self, expected: char) -> bool {
+        if self.peek() == Some(expected) {
+            self.position += expected.len_utf8();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.input[self.position..].chars().next()
+    }
+
+    fn skip_whitespace(&mut self) {
+        while let Some(character) = self.peek() {
+            if character.is_whitespace() {
+                self.position += character.len_utf8();
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+pub fn format_number(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        value.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matches_math_functions_for_completion() {
+        let matches = matching_functions("=SU");
+
+        assert!(matches.iter().any(|function| function.name == "SUM"));
+        assert!(matches.iter().any(|function| function.name == "SUBTRACT"));
+    }
+
+    #[test]
+    fn evaluates_basic_arithmetic_with_precedence() {
+        assert_eq!(evaluate_formula("=1+2*3"), Ok(FormulaValue::Number(7.0)));
+        assert_eq!(evaluate_formula("=(1+2)*3"), Ok(FormulaValue::Number(9.0)));
+        assert_eq!(evaluate_formula("=-4/2"), Ok(FormulaValue::Number(-2.0)));
+    }
+
+    #[test]
+    fn evaluates_named_math_functions() {
+        assert_eq!(
+            evaluate_formula("=SUM(1, 2, 3*4)"),
+            Ok(FormulaValue::Number(15.0))
+        );
+        assert_eq!(
+            evaluate_formula("=AVERAGE(2, 4, 6)"),
+            Ok(FormulaValue::Number(4.0))
+        );
+        assert_eq!(
+            evaluate_formula("=DIVIDE(10, 2)"),
+            Ok(FormulaValue::Number(5.0))
+        );
+    }
+
+    #[test]
+    fn ai_formulas_are_explicit_noops() {
+        assert_eq!(
+            evaluate_formula("=GENERATEIMAGE(A1, A2)"),
+            Ok(FormulaValue::Pending(
+                "AI image generation is not implemented yet.".to_string()
+            ))
+        );
+        assert_eq!(
+            evaluate_formula("=LLM(A1, A2)"),
+            Ok(FormulaValue::Pending(
+                "LLM generation is not implemented yet.".to_string()
+            ))
+        );
+        assert!(
+            !FORMULA_FUNCTIONS
+                .iter()
+                .any(|function| function.name == "PROMPT")
+        );
+        assert!(
+            !FORMULA_FUNCTIONS
+                .iter()
+                .any(|function| function.name == "STORYBOARD")
+        );
+    }
 }

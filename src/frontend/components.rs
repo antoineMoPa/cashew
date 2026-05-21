@@ -242,9 +242,9 @@ fn CellEditor(
         .and_then(|sheet| sheet.cell(row, col))
         .cloned();
 
-    let value = cell.as_ref().map(|cell| cell.input.as_str()).unwrap_or("");
+    let value = cell_display_value(cell.as_ref(), selected);
     let status_class = match cell.as_ref().map(|cell| &cell.value) {
-        Some(CellValue::FormulaPending) => " formula",
+        Some(CellValue::FormulaPending { .. }) => " formula",
         Some(CellValue::Cached(_)) => " cached",
         Some(CellValue::Error(_)) => " error",
         _ => "",
@@ -265,6 +265,24 @@ fn CellEditor(
                 state.with_mut(|state| state.set_cell_input(row, col, value));
             }
         }
+    }
+}
+
+fn cell_display_value(cell: Option<&crate::backend::document::Cell>, selected: bool) -> String {
+    let Some(cell) = cell else {
+        return String::new();
+    };
+
+    if selected {
+        return cell.input.clone();
+    }
+
+    match &cell.value {
+        CellValue::Empty => String::new(),
+        CellValue::Text(value) => value.clone(),
+        CellValue::FormulaPending { message } => message.clone(),
+        CellValue::Cached(value) => value.clone(),
+        CellValue::Error(error) => format!("#ERROR: {error}"),
     }
 }
 

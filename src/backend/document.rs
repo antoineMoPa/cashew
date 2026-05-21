@@ -3,7 +3,10 @@ use std::{collections::BTreeMap, fs, path::Path};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-use super::cache::CacheEntry;
+use super::{
+    cache::CacheEntry,
+    formulas::{FormulaValue, evaluate_formula, format_number},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CashewDocument {
@@ -37,7 +40,7 @@ pub struct Cell {
 pub enum CellValue {
     Empty,
     Text(String),
-    FormulaPending,
+    FormulaPending { message: String },
     Cached(String),
     Error(String),
 }
@@ -98,7 +101,11 @@ impl Sheet {
         let value = if input.trim().is_empty() {
             CellValue::Empty
         } else if input.trim_start().starts_with('=') {
-            CellValue::FormulaPending
+            match evaluate_formula(&input) {
+                Ok(FormulaValue::Number(number)) => CellValue::Text(format_number(number)),
+                Ok(FormulaValue::Pending(message)) => CellValue::FormulaPending { message },
+                Err(error) => CellValue::Error(error),
+            }
         } else {
             CellValue::Text(input.clone())
         };
