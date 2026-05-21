@@ -120,6 +120,25 @@ impl Sheet {
         );
     }
 
+    pub fn set_cell_value_with_cache(
+        &mut self,
+        row: usize,
+        col: usize,
+        input: String,
+        value: CellValue,
+        cache_key: Option<String>,
+    ) {
+        self.ensure_size(row + 1, col + 1);
+        self.cells.insert(
+            cell_key(row, col),
+            Cell {
+                input,
+                value,
+                cache_key,
+            },
+        );
+    }
+
     pub fn cell(&self, row: usize, col: usize) -> Option<&Cell> {
         self.cells.get(&cell_key(row, col))
     }

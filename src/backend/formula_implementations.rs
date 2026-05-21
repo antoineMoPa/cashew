@@ -1,6 +1,7 @@
 use super::{
     document::{CellValue, Sheet},
     formulas::{FORMULA_FUNCTIONS, FormulaImplementation, MathFunction},
+    providers::openrouter::{DEFAULT_MODEL, OpenRouterRequest},
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -38,6 +39,9 @@ fn evaluate_formula_with_sheet(input: &str, sheet: Option<&Sheet>) -> Result<For
             FormulaImplementation::NoopAi { placeholder } => {
                 Ok(FormulaValue::Pending(placeholder.to_string()))
             }
+            FormulaImplementation::ProviderAi { provider } => Ok(FormulaValue::Pending(format!(
+                "{provider} request is ready to run"
+            ))),
             FormulaImplementation::Math(math) => {
                 let values = parse_numeric_arguments(args, sheet)?;
                 evaluate_math_function(math, &values)
@@ -48,6 +52,49 @@ fn evaluate_formula_with_sheet(input: &str, sheet: Option<&Sheet>) -> Result<For
     ExpressionParser::new(expression, sheet)
         .parse()
         .map(FormulaValue::Number)
+}
+
+pub fn llm_request_for_sheet(
+    input: &str,
+    sheet: &Sheet,
+) -> Result<Option<OpenRouterRequest>, String> {
+    let expression = input
+        .trim_start()
+        .strip_prefix('=')
+        .ok_or_else(|| "Formula must start with =".to_string())?
+        .trim();
+    let Some((name, args)) = parse_function_call(expression)? else {
+        return Ok(None);
+    };
+
+    if !name.eq_ignore_ascii_case("LLM") {
+        return Ok(None);
+    }
+
+    let args = split_formula_arguments(args)?;
+    if args.is_empty() || args.len() > 3 {
+        return Err("LLM expects prompt, optional model, optional system_prompt".to_string());
+    }
+
+    let prompt = resolve_text_argument(&args[0], sheet)?;
+    let model = args
+        .get(1)
+        .map(|arg| resolve_text_argument(arg, sheet))
+        .transpose()?
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let system_prompt = args
+        .get(2)
+        .map(|arg| resolve_text_argument(arg, sheet))
+        .transpose()?
+        .filter(|value| !value.trim().is_empty());
+
+    let mut request = OpenRouterRequest::new(prompt).with_model(model);
+    if let Some(system_prompt) = system_prompt {
+        request = request.with_system_prompt(system_prompt);
+    }
+
+    Ok(Some(request))
 }
 
 fn parse_function_call(expression: &str) -> Result<Option<(String, &str)>, String> {
@@ -86,6 +133,65 @@ fn parse_numeric_arguments(args: &str, sheet: Option<&Sheet>) -> Result<Vec<f64>
     args.split(',')
         .map(|arg| ExpressionParser::new(arg.trim(), sheet).parse())
         .collect()
+}
+
+fn split_formula_arguments(args: &str) -> Result<Vec<String>, String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut in_string = false;
+    let mut escape = false;
+
+    for character in args.chars() {
+        if escape {
+            current.push(character);
+            escape = false;
+            continue;
+        }
+
+        match character {
+            '\\' if in_string => {
+                current.push(character);
+                escape = true;
+            }
+            '"' => {
+                in_string = !in_string;
+                current.push(character);
+            }
+            ',' if !in_string => {
+                parts.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(character),
+        }
+    }
+
+    if in_string {
+        return Err("String argument is missing a closing quote".to_string());
+    }
+
+    parts.push(current.trim().to_string());
+    Ok(parts)
+}
+
+fn resolve_text_argument(arg: &str, sheet: &Sheet) -> Result<String, String> {
+    let arg = arg.trim();
+    if arg.len() >= 2 && arg.starts_with('"') && arg.ends_with('"') {
+        return Ok(arg[1..arg.len() - 1]
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\"));
+    }
+
+    if let Ok((row, col)) = parse_cell_reference(arg) {
+        return match sheet.cell(row, col).map(|cell| &cell.value) {
+            Some(CellValue::Text(value)) => Ok(value.clone()),
+            Some(CellValue::Cached(value)) => Ok(value.clone()),
+            Some(CellValue::FormulaPending { message }) => Ok(message.clone()),
+            Some(CellValue::Error(error)) => Err(format!("{arg} has an error: {error}")),
+            Some(CellValue::Empty) | None => Ok(String::new()),
+        };
+    }
+
+    Ok(arg.to_string())
 }
 
 fn evaluate_math_function(function: MathFunction, args: &[f64]) -> Result<FormulaValue, String> {
@@ -418,9 +524,23 @@ mod tests {
         assert_eq!(
             evaluate_formula("=LLM(A1, A2)"),
             Ok(FormulaValue::Pending(
-                "LLM via fal OpenRouter is configured but execution is not wired yet.".to_string()
+                "fal.openrouter request is ready to run".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn builds_llm_request_from_literals_and_cell_refs() {
+        let mut sheet = Sheet::new("LLM", 2, 2);
+        sheet.set_cell_input(0, 0, "Say hi".to_string());
+
+        let request = llm_request_for_sheet(r#"=LLM($A1, "google/gemini-2.5-flash", "")"#, &sheet)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(request.prompt, "Say hi");
+        assert_eq!(request.model, "google/gemini-2.5-flash");
+        assert_eq!(request.system_prompt, None);
     }
 
     #[test]

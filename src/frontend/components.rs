@@ -1,3 +1,4 @@
+use dioxus::prelude::Key;
 use dioxus::prelude::*;
 
 use crate::backend::document::{CashewDocument, CellValue, cell_key, column_name};
@@ -76,14 +77,18 @@ pub(crate) fn SettingsDialog(mut state: Signal<AppState>) -> Element {
                 div { class: "settings-title", "Settings" }
                 label { class: "settings-field",
                     span { "FAL key" }
-                    input {
-                        class: "settings-input",
-                        r#type: "password",
-                        value: "{fal_key}",
-                        placeholder: "fal key",
-                        oninput: move |event| {
-                            let value = event.value();
-                            state.with_mut(|state| state.set_settings_fal_key(value));
+                input {
+                    class: "settings-input",
+                    r#type: "password",
+                    value: "{fal_key}",
+                    placeholder: "fal key",
+                    autocomplete: "off",
+                    autocorrect: "off",
+                    autocapitalize: "off",
+                    spellcheck: "false",
+                    oninput: move |event| {
+                        let value = event.value();
+                        state.with_mut(|state| state.set_settings_fal_key(value));
                         }
                     }
                 }
@@ -121,12 +126,35 @@ pub(crate) fn FormulaBar(mut state: Signal<AppState>) -> Element {
                 input {
                     class: "formula-input",
                     value: "{formula_input}",
+                    autocomplete: "off",
+                    autocorrect: "off",
+                    autocapitalize: "off",
+                    spellcheck: "false",
                     onfocus: move |_| state.with_mut(|state| {
                         state.completions_open = should_show_completions(&state.formula_input);
                     }),
+                    onblur: move |_| {
+                        let work = state.with_mut(|state| {
+                            state.commit_formula_buffer();
+                            let (row, col) = state.selected_cell;
+                            state.prepare_llm_for_cell(row, col)
+                        });
+                        spawn_llm_work(state, work);
+                    },
+                    onkeydown: move |event| {
+                        if event.key() == Key::Enter {
+                            event.prevent_default();
+                            let work = state.with_mut(|state| {
+                                state.commit_formula_buffer();
+                                let (row, col) = state.selected_cell;
+                                state.prepare_llm_for_cell(row, col)
+                            });
+                            spawn_llm_work(state, work);
+                        }
+                    },
                     oninput: move |event| {
-                        let value = event.value();
-                        state.with_mut(|state| state.set_selected_formula(value));
+                        let value = normalize_editor_text(event.value());
+                        state.with_mut(|state| state.set_formula_buffer(value));
                     }
                 }
                 FormulaCompletions { state }
@@ -308,14 +336,58 @@ fn CellEditor(
 
     rsx! {
         input {
+            id: "cell-{row}-{col}",
             class,
             style,
             value: "{value}",
+            autocomplete: "off",
+            autocorrect: "off",
+            autocapitalize: "off",
+            spellcheck: "false",
             onfocus: move |_| {
                 state.with_mut(|state| state.select_or_insert_cell_reference(row, col));
             },
+            onblur: move |_| {
+                let work = state.with_mut(|state| state.prepare_llm_for_cell(row, col));
+                spawn_llm_work(state, work);
+            },
+            onkeydown: move |event| {
+                match event.key() {
+                    Key::ArrowUp => {
+                        event.prevent_default();
+                        let (row, col) = state.with_mut(|state| state.move_selection(-1, 0));
+                        focus_cell(row, col);
+                    }
+                    Key::ArrowDown => {
+                        event.prevent_default();
+                        let (row, col) = state.with_mut(|state| state.move_selection(1, 0));
+                        focus_cell(row, col);
+                    }
+                    Key::ArrowLeft => {
+                        event.prevent_default();
+                        let (row, col) = state.with_mut(|state| state.move_selection(0, -1));
+                        focus_cell(row, col);
+                    }
+                    Key::ArrowRight => {
+                        event.prevent_default();
+                        let (row, col) = state.with_mut(|state| state.move_selection(0, 1));
+                        focus_cell(row, col);
+                    }
+                    Key::Enter => {
+                        event.prevent_default();
+                        let work = state.with_mut(|state| state.prepare_llm_for_cell(row, col));
+                        if work.is_some() {
+                            spawn_llm_work(state, work);
+                        } else {
+                            let (row, col) = state.with_mut(|state| state.move_selection(1, 0));
+                            focus_cell(row, col);
+                        }
+                    }
+                    _ => {}
+                }
+            },
             oninput: move |event| {
-                let value = event.value();
+                let value = normalize_editor_text(event.value());
                 state.with_mut(|state| state.set_cell_input(row, col, value));
             }
         }
@@ -338,6 +410,39 @@ fn cell_display_value(cell: Option<&crate::backend::document::Cell>, selected: b
         CellValue::Cached(value) => value.clone(),
         CellValue::Error(error) => format!("#ERROR: {error}"),
     }
+}
+
+fn normalize_editor_text(value: String) -> String {
+    value.replace(['“', '”'], "\"").replace(['‘', '’'], "'")
+}
+
+type LlmWork = (
+    usize,
+    usize,
+    String,
+    String,
+    crate::backend::providers::openrouter::OpenRouterRequest,
+);
+
+fn spawn_llm_work(state: Signal<AppState>, work: Option<LlmWork>) {
+    if let Some((row, col, input, cache_key, request)) = work {
+        spawn(async move {
+            AppState::run_llm_for_cell(state, row, col, input, cache_key, request).await;
+        });
+    }
+}
+
+fn focus_cell(row: usize, col: usize) {
+    let script = format!(
+        r#"setTimeout(() => {{
+            const cell = document.getElementById("cell-{row}-{col}");
+            if (cell) {{
+                cell.focus();
+                cell.select();
+            }}
+        }}, 0);"#
+    );
+    let _ = dioxus::document::eval(&script);
 }
 
 #[component]

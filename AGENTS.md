@@ -1,37 +1,30 @@
 # Cashew Project Context
 
-Cashew is a cached, Excel-like desktop application for media-generation workflows. The frontend is built with Dioxus Desktop for CSS-driven layout and styling control, and the Rust backend should own document state, formula evaluation, cache keys, provider integration, and JSON serialization.
+Cashew is a cached spreadsheet desktop application for orchestrating `fal.ai` workflows from cells. The frontend is built with Dioxus Desktop for CSS-driven layout and styling control, and the Rust backend should own document state, formula evaluation, cache keys, provider integration, and JSON serialization.
 
-The product direction is a spreadsheet where users can prototype prompt pipelines and media workflows. A typical flow is:
+The product direction is a spreadsheet-based UI for AI prototyping, providing a structured alternative to node UI pipelines and code-driven approaches. It should empower creatives to design custom AI workflows combining multiple AI models in a cost-effective way with result caching. Cells can hold raw inputs, formulas, intermediate outputs, model choices, prompt variants, references, structured JSON, and final artifacts.
 
-1. Draft or manipulate prompts and scenario/storyboard data in cells.
-2. Generate storyboard images from prompts and references.
-3. Generate videos from images, prompts, and other inputs.
-4. Concatenate outputs into longer media, up to complete short films.
+Important workflow categories include:
 
-Some users may only need image-generation workflows, so media features should stay modular rather than assuming every project becomes a full movie pipeline.
+- LLM calls for prompt manipulation, planning, summarization, extraction, and structured text generation.
+- Image, video, audio, and other media generation through later formula functions.
+- Multi-step pipelines where one cell's output becomes another cell's input.
+- Batch exploration of parameter grids such as model, prompt, seed, style, size, temperature, or other provider-specific options.
 
-Core formula examples planned for later include:
-
-```text
-=GENERATEIMAGE(A1, A2)
-=GENERATEVIDEO(...)
-```
-
-These formulas are intentionally not implemented yet. When they are added, formula execution must be cache-first: identical formulas with identical resolved inputs should reuse stored results so users do not pay twice for the same provider call. External generation providers, especially `fal.ai`, should be integrated behind backend abstractions rather than called directly from UI code.
+Formula execution must be cache-first. Identical formulas with identical resolved inputs should reuse stored results so users do not pay twice for the same provider call. Provider calls should go through backend abstractions and should never be called directly from UI code.
 
 Files should remain serializable to JSON. Preserve compatibility with saved documents by versioning schema changes and keeping cache entries explicit in the document model.
 
 UI direction:
 
 - Keep the first screen as the actual spreadsheet-like workspace.
-- Use CSS to keep the grid visually close to Google Sheets/Excel: edge-to-edge workspace, compact cells, row/column headers, formula bar, and resize handles.
+- Use CSS to keep the grid visually close to a familiar spreadsheet: edge-to-edge workspace, compact cells, row/column headers, formula bar, and resize handles.
 - Maintain a File menu for document actions; add an Edit menu later.
-- Treat media-generation state as document data, not transient frontend-only state.
+- Treat provider outputs, cache state, and generated artifacts as document data, not transient frontend-only state.
 
 Engineering direction:
 
 - Keep frontend and backend concerns separated.
 - Prefer deterministic cache keys based on formula identity and resolved inputs.
-- Avoid implementing real provider calls until the formula and cache model are ready.
-- Keep tests around document serialization and cache behavior as the model evolves.
+- Keep provider integrations modular so new `fal.ai` endpoints can be added as formula functions without rewriting UI code.
+- Keep tests around document serialization, formula evaluation, provider request construction, and cache behavior as the model evolves.

@@ -1,7 +1,12 @@
 use std::path::PathBuf;
 
-use crate::backend::document::{CashewDocument, cell_key, column_name};
+use dioxus::prelude::WritableExt;
+
+use crate::backend::cache::{CacheEntry, CacheStatus, CachedValue, stable_cache_key};
+use crate::backend::document::{CashewDocument, CellValue, cell_key, column_name};
+use crate::backend::formula_implementations::llm_request_for_sheet;
 use crate::backend::formulas::FormulaFunction;
+use crate::backend::providers::openrouter::{OpenRouterClient, OpenRouterRequest};
 use crate::backend::settings::{UserSettings, settings_path};
 
 const MIN_COLUMN_WIDTH: i32 = 72;
@@ -91,11 +96,124 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn run_llm_for_cell(
+        mut state: dioxus::prelude::Signal<Self>,
+        row: usize,
+        col: usize,
+        input: String,
+        cache_key: String,
+        request: OpenRouterRequest,
+    ) {
+        let result = run_openrouter_request(&request).await;
+
+        state.with_mut(|state| {
+            state.finish_llm_for_cell(row, col, input, cache_key, result);
+        });
+    }
+
+    pub(crate) fn prepare_llm_for_cell(
+        &mut self,
+        row: usize,
+        col: usize,
+    ) -> Option<(usize, usize, String, String, OpenRouterRequest)> {
+        let sheet = self.document.active_sheet()?;
+        let cell = sheet.cell(row, col)?;
+        if !llm_cell_is_runnable(&cell.value) {
+            return None;
+        }
+
+        let input = cell.input.clone();
+        let request = llm_request_for_sheet(&input, sheet).ok().flatten()?;
+        let cache_key = llm_cache_key(&input, &request);
+
+        if let Some(cached) = cached_text(&self.document, &cache_key) {
+            if let Some(sheet) = self.document.active_sheet_mut() {
+                sheet.set_cell_value_with_cache(
+                    row,
+                    col,
+                    input,
+                    CellValue::Cached(cached),
+                    Some(cache_key),
+                );
+            }
+            self.status = format!("Used cached LLM result for {}", cell_key(row, col));
+            return None;
+        }
+
+        if let Some(sheet) = self.document.active_sheet_mut() {
+            sheet.set_cell_value_with_cache(
+                row,
+                col,
+                input.clone(),
+                CellValue::FormulaPending {
+                    message: "Running LLM...".to_string(),
+                },
+                Some(cache_key.clone()),
+            );
+        }
+        self.status = format!("Running LLM for {}", cell_key(row, col));
+
+        Some((row, col, input, cache_key, request))
+    }
+
+    pub(crate) fn finish_llm_for_cell(
+        &mut self,
+        row: usize,
+        col: usize,
+        input: String,
+        cache_key: String,
+        result: anyhow::Result<String>,
+    ) {
+        let value = match result {
+            Ok(output) => {
+                self.document.cache.insert(
+                    cache_key.clone(),
+                    CacheEntry {
+                        key: cache_key.clone(),
+                        status: CacheStatus::Ready,
+                        value: CachedValue::Text(output.clone()),
+                    },
+                );
+                self.status = format!("LLM completed for {}", cell_key(row, col));
+                CellValue::Cached(output)
+            }
+            Err(error) => {
+                self.document.cache.insert(
+                    cache_key.clone(),
+                    CacheEntry {
+                        key: cache_key.clone(),
+                        status: CacheStatus::Failed {
+                            message: error.to_string(),
+                        },
+                        value: CachedValue::Text(String::new()),
+                    },
+                );
+                self.status = format!("LLM failed for {}", cell_key(row, col));
+                CellValue::Error(error.to_string())
+            }
+        };
+
+        if let Some(sheet) = self.document.active_sheet_mut() {
+            sheet.set_cell_value_with_cache(row, col, input, value, Some(cache_key));
+            self.dirty = true;
+        }
+    }
+
     pub(crate) fn set_selected_formula(&mut self, value: String) {
         let (row, col) = self.selected_cell;
         self.completions_open = should_show_completions(&value);
         self.formula_input = value.clone();
         self.set_cell_input(row, col, value);
+    }
+
+    pub(crate) fn set_formula_buffer(&mut self, value: String) {
+        self.completions_open = should_show_completions(&value);
+        self.formula_input = value;
+    }
+
+    pub(crate) fn commit_formula_buffer(&mut self) {
+        let (row, col) = self.selected_cell;
+        self.set_cell_input(row, col, self.formula_input.clone());
     }
 
     pub(crate) fn select_or_insert_cell_reference(&mut self, row: usize, col: usize) {
@@ -104,6 +222,14 @@ impl AppState {
         } else {
             self.set_selected_cell(row, col);
         }
+    }
+
+    pub(crate) fn move_selection(&mut self, row_delta: isize, col_delta: isize) -> (usize, usize) {
+        let (row, col) = self.selected_cell;
+        let next_row = row.saturating_add_signed(row_delta);
+        let next_col = col.saturating_add_signed(col_delta);
+        self.set_selected_cell(next_row, next_col);
+        self.selected_cell
     }
 
     pub(crate) fn insert_cell_reference(&mut self, row: usize, col: usize) {
@@ -326,6 +452,36 @@ fn formula_accepts_cell_reference(input: &str) -> bool {
             || trimmed.ends_with('-')
             || trimmed.ends_with('*')
             || trimmed.ends_with('/'))
+}
+
+async fn run_openrouter_request(request: &OpenRouterRequest) -> anyhow::Result<String> {
+    let client = OpenRouterClient::from_settings_or_env()?;
+    client.run(request).await.map(|response| response.output)
+}
+
+fn llm_cache_key(input: &str, request: &OpenRouterRequest) -> String {
+    let request_json = serde_json::to_string(request).unwrap_or_else(|_| request.prompt.clone());
+    stable_cache_key(input, &[request_json])
+}
+
+fn cached_text(document: &CashewDocument, cache_key: &str) -> Option<String> {
+    let entry = document.cache.get(cache_key)?;
+    if entry.status != CacheStatus::Ready {
+        return None;
+    }
+
+    match &entry.value {
+        CachedValue::Text(value) => Some(value.clone()),
+        CachedValue::Json(_) | CachedValue::MediaAsset(_) => None,
+    }
+}
+
+fn llm_cell_is_runnable(value: &CellValue) -> bool {
+    match value {
+        CellValue::FormulaPending { message } => message.ends_with("request is ready to run"),
+        CellValue::Error(_) => true,
+        CellValue::Empty | CellValue::Text(_) | CellValue::Cached(_) => false,
+    }
 }
 
 #[cfg(test)]

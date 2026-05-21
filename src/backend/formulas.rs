@@ -11,6 +11,7 @@ pub struct FormulaFunction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormulaImplementation {
     NoopAi { placeholder: &'static str },
+    ProviderAi { provider: &'static str },
     Math(MathFunction),
 }
 
@@ -63,9 +64,9 @@ pub const FORMULA_FUNCTIONS: &[FormulaFunction] = &[
         signature: "LLM(prompt, model, system_prompt)",
         insert_text: "=LLM(prompt, \"google/gemini-2.5-flash\", system_prompt)",
         summary: "Generate or transform text through fal OpenRouter.",
-        details: "Set up for fal endpoint openrouter/router. No-op in cell evaluation until async provider execution and cache writes are wired.",
-        implementation: FormulaImplementation::NoopAi {
-            placeholder: "LLM via fal OpenRouter is configured but execution is not wired yet.",
+        details: "Runs through fal endpoint openrouter/router using the saved FAL key.",
+        implementation: FormulaImplementation::ProviderAi {
+            provider: "fal.openrouter",
         },
     },
     FormulaFunction {
