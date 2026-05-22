@@ -298,6 +298,15 @@ input {
     box-shadow: inset 0 0 0 2px #1a73e8;
 }
 
+.cell.in-selection {
+    background: #e8f0fe;
+}
+
+.cell.in-selection.selected,
+.cell.in-selection:focus {
+    background: #fff;
+}
+
 .cell.formula {
     color: #188038;
 }

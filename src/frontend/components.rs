@@ -1,5 +1,5 @@
-use dioxus::prelude::Key;
 use dioxus::prelude::*;
+use dioxus::prelude::{Key, ModifiersInteraction};
 
 use crate::backend::document::{CashewDocument, CellValue, cell_key, column_name};
 use crate::backend::formulas::matching_functions;
@@ -207,6 +207,7 @@ pub(crate) fn SheetView(mut state: Signal<AppState>) -> Element {
         .map(|row| sheet.row_height(row))
         .collect::<Vec<_>>();
     let selected_cell = snapshot.selected_cell;
+    let selection_range = snapshot.selection_range();
     let document = snapshot.document.clone();
     drop(snapshot);
 
@@ -236,6 +237,7 @@ pub(crate) fn SheetView(mut state: Signal<AppState>) -> Element {
                             width: column_widths[col],
                             height: row_heights[row],
                             selected: selected_cell == (row, col),
+                            in_selection: selection_range.contains(row, col),
                         }
                     }
                 }
@@ -304,6 +306,7 @@ fn CellEditor(
     width: u16,
     height: u16,
     selected: bool,
+    in_selection: bool,
 ) -> Element {
     let cell = document
         .active_sheet()
@@ -318,7 +321,8 @@ fn CellEditor(
         _ => "",
     };
     let selected_class = if selected { " selected" } else { "" };
-    let class = format!("cell{}{}", status_class, selected_class);
+    let selection_class = if in_selection { " in-selection" } else { "" };
+    let class = format!("cell{}{}{}", status_class, selected_class, selection_class);
     let style = format!("width: {}px; height: {}px;", width, height);
 
     rsx! {
@@ -331,33 +335,86 @@ fn CellEditor(
             autocorrect: "off",
             autocapitalize: "off",
             spellcheck: "false",
+            onmousedown: move |event| {
+                let extend = event.modifiers().shift();
+                state.with_mut(|state| state.begin_cell_interaction(row, col, extend));
+            },
+            onmouseenter: move |_| {
+                state.with_mut(|state| {
+                    if state.selecting {
+                        state.extend_selection(row, col);
+                    }
+                });
+            },
             onfocus: move |_| {
-                state.with_mut(|state| state.select_or_insert_cell_reference(row, col));
+                state.with_mut(|state| {
+                    if !state.selecting {
+                        state.select_or_insert_cell_reference(row, col);
+                    }
+                });
             },
             onblur: move |_| {
                 let work = state.with_mut(|state| state.prepare_llm_for_cell(row, col));
                 spawn_llm_work(state, work);
             },
             onkeydown: move |event| {
+                if shortcut_key(&event, "c") {
+                    event.prevent_default();
+                    let copied_text = state.with_mut(AppState::copy_selection);
+                    write_clipboard(copied_text);
+                    return;
+                }
+
+                if shortcut_key(&event, "v") {
+                    event.prevent_default();
+                    paste_from_clipboard(state);
+                    return;
+                }
+
+                let extend = event.modifiers().shift();
                 match event.key() {
                     Key::ArrowUp => {
                         event.prevent_default();
-                        let (row, col) = state.with_mut(|state| state.move_selection(-1, 0));
+                        let (row, col) = state.with_mut(|state| {
+                            if extend {
+                                state.extend_selection_with_keyboard(-1, 0)
+                            } else {
+                                state.move_selection(-1, 0)
+                            }
+                        });
                         focus_cell(row, col);
                     }
                     Key::ArrowDown => {
                         event.prevent_default();
-                        let (row, col) = state.with_mut(|state| state.move_selection(1, 0));
+                        let (row, col) = state.with_mut(|state| {
+                            if extend {
+                                state.extend_selection_with_keyboard(1, 0)
+                            } else {
+                                state.move_selection(1, 0)
+                            }
+                        });
                         focus_cell(row, col);
                     }
                     Key::ArrowLeft => {
                         event.prevent_default();
-                        let (row, col) = state.with_mut(|state| state.move_selection(0, -1));
+                        let (row, col) = state.with_mut(|state| {
+                            if extend {
+                                state.extend_selection_with_keyboard(0, -1)
+                            } else {
+                                state.move_selection(0, -1)
+                            }
+                        });
                         focus_cell(row, col);
                     }
                     Key::ArrowRight => {
                         event.prevent_default();
-                        let (row, col) = state.with_mut(|state| state.move_selection(0, 1));
+                        let (row, col) = state.with_mut(|state| {
+                            if extend {
+                                state.extend_selection_with_keyboard(0, 1)
+                            } else {
+                                state.move_selection(0, 1)
+                            }
+                        });
                         focus_cell(row, col);
                     }
                     Key::Enter => {
@@ -430,6 +487,57 @@ fn focus_cell(row: usize, col: usize) {
         }}, 0);"#
     );
     let _ = dioxus::document::eval(&script);
+}
+
+fn shortcut_key(event: &KeyboardEvent, expected: &str) -> bool {
+    let modifiers = event.modifiers();
+    if !modifiers.ctrl() && !modifiers.meta() {
+        return false;
+    }
+
+    match event.key() {
+        Key::Character(value) => value.eq_ignore_ascii_case(expected),
+        _ => false,
+    }
+}
+
+fn write_clipboard(text: String) {
+    let Ok(text_json) = serde_json::to_string(&text) else {
+        return;
+    };
+    let script = format!(
+        r#"
+        const text = {text_json};
+        if (navigator.clipboard && navigator.clipboard.writeText) {{
+            await navigator.clipboard.writeText(text);
+        }} else {{
+            const textarea = document.createElement("textarea");
+            textarea.value = text;
+            textarea.style.position = "fixed";
+            textarea.style.opacity = "0";
+            document.body.appendChild(textarea);
+            textarea.focus();
+            textarea.select();
+            document.execCommand("copy");
+            textarea.remove();
+        }}
+        "#
+    );
+    let _ = dioxus::document::eval(&script);
+}
+
+fn paste_from_clipboard(mut state: Signal<AppState>) {
+    spawn(async move {
+        let script = r#"
+            if (navigator.clipboard && navigator.clipboard.readText) {
+                return await navigator.clipboard.readText();
+            }
+            return "";
+        "#;
+        if let Ok(text) = dioxus::document::eval(script).await {
+            state.with_mut(|state| state.paste_cells(text.as_str().unwrap_or_default()));
+        }
+    });
 }
 
 #[component]
