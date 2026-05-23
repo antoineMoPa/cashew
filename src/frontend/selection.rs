@@ -38,11 +38,15 @@ impl SelectionRange {
 impl AppState {
     pub(crate) fn begin_selection(&mut self, row: usize, col: usize, extend: bool) {
         self.ensure_work_area(row + GROWTH_BUFFER_ROWS, col + GROWTH_BUFFER_COLS);
+        if self.selected_cell != (row, col) {
+            self.editing_cell = None;
+        }
         if !extend {
             self.selection_anchor = (row, col);
             self.selected_cell = (row, col);
             self.formula_input = cell_input(&self.document, row, col);
             self.completions_open = false;
+            self.completion_index = 0;
         }
         self.selection_end = (row, col);
         self.selecting = true;
@@ -83,8 +87,10 @@ impl AppState {
         self.ensure_work_area(next_row + GROWTH_BUFFER_ROWS, next_col + GROWTH_BUFFER_COLS);
         self.selection_end = (next_row, next_col);
         self.selected_cell = (next_row, next_col);
+        self.editing_cell = None;
         self.formula_input = cell_input(&self.document, next_row, next_col);
         self.completions_open = false;
+        self.completion_index = 0;
         self.selected_cell
     }
 
@@ -137,8 +143,10 @@ impl AppState {
         self.selection_anchor = (range.start_row, range.start_col);
         self.selection_end = (range.end_row, range.end_col);
         self.selected_cell = (range.start_row, range.start_col);
+        self.editing_cell = None;
         self.formula_input = cell_input(&self.document, range.start_row, range.start_col);
         self.completions_open = false;
+        self.completion_index = 0;
         self.status = format!(
             "Cut {}",
             range_label(
@@ -201,8 +209,10 @@ impl AppState {
             target_col + col_count.saturating_sub(1),
         );
         self.selected_cell = (target_row, target_col);
+        self.editing_cell = None;
         self.formula_input = cell_input(&self.document, target_row, target_col);
         self.completions_open = false;
+        self.completion_index = 0;
         self.status = format!(
             "Pasted {} cells at {}",
             row_count * col_count,

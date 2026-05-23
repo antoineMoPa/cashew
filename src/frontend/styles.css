@@ -135,14 +135,38 @@ input {
 }
 
 .formula-input {
+    position: relative;
+    z-index: 2;
     width: 100%;
     height: 100%;
     padding: 0 10px;
     border: 0;
     outline: 0;
     color: #202124;
-    background: #fff;
+    background: transparent;
     user-select: text;
+}
+
+.formula-autocomplete {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    padding: 0 10px;
+    overflow: hidden;
+    color: #9aa0a6;
+    font: inherit;
+    pointer-events: none;
+    white-space: pre;
+}
+
+.formula-autocomplete-prefix {
+    color: transparent;
+}
+
+.formula-autocomplete-suffix {
+    color: #9aa0a6;
 }
 
 .formula-completions {
@@ -171,6 +195,10 @@ input {
 }
 
 .completion-item:hover {
+    background: #e8f0fe;
+}
+
+.completion-item.selected {
     background: #e8f0fe;
 }
 

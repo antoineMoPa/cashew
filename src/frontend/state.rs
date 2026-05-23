@@ -29,6 +29,7 @@ pub(crate) struct AppState {
     pub(crate) dirty: bool,
     pub(crate) status: String,
     pub(crate) selected_cell: (usize, usize),
+    pub(crate) editing_cell: Option<(usize, usize)>,
     pub(crate) selection_anchor: (usize, usize),
     pub(crate) selection_end: (usize, usize),
     pub(crate) selecting: bool,
@@ -36,6 +37,7 @@ pub(crate) struct AppState {
     pub(crate) formula_input: String,
     pub(crate) resizing: Option<ResizeDrag>,
     pub(crate) completions_open: bool,
+    pub(crate) completion_index: usize,
     pub(crate) settings_open: bool,
     pub(crate) settings_fal_key: String,
     pub(crate) settings_path: Option<PathBuf>,
@@ -71,6 +73,7 @@ impl AppState {
             dirty: false,
             status: settings_status.unwrap_or_else(|| "Ready".to_string()),
             selected_cell: (0, 0),
+            editing_cell: None,
             selection_anchor: (0, 0),
             selection_end: (0, 0),
             selecting: false,
@@ -78,6 +81,7 @@ impl AppState {
             formula_input,
             resizing: None,
             completions_open: false,
+            completion_index: 0,
             settings_open: false,
             settings_fal_key,
             settings_path,
@@ -87,10 +91,12 @@ impl AppState {
     pub(crate) fn set_selected_cell(&mut self, row: usize, col: usize) {
         self.ensure_work_area(row + GROWTH_BUFFER_ROWS, col + GROWTH_BUFFER_COLS);
         self.selected_cell = (row, col);
+        self.editing_cell = None;
         self.selection_anchor = (row, col);
         self.selection_end = (row, col);
         self.formula_input = cell_input(&self.document, row, col);
         self.completions_open = false;
+        self.completion_index = 0;
     }
 
     pub(crate) fn set_cell_input(&mut self, row: usize, col: usize, value: String) {
@@ -104,7 +110,23 @@ impl AppState {
 
         if self.selected_cell == (row, col) {
             self.completions_open = false;
+            self.completion_index = 0;
             self.formula_input = value;
+        }
+    }
+
+    pub(crate) fn set_editing_cell_input(&mut self, row: usize, col: usize, value: String) {
+        self.editing_cell = Some((row, col));
+        self.set_cell_input(row, col, value);
+    }
+
+    pub(crate) fn cell_is_being_edited(&self, row: usize, col: usize) -> bool {
+        self.editing_cell == Some((row, col))
+    }
+
+    pub(crate) fn finish_cell_edit(&mut self, row: usize, col: usize) {
+        if self.editing_cell == Some((row, col)) {
+            self.editing_cell = None;
         }
     }
 
@@ -215,13 +237,27 @@ impl AppState {
     pub(crate) fn set_selected_formula(&mut self, value: String) {
         let (row, col) = self.selected_cell;
         self.completions_open = should_show_completions(&value);
+        self.completion_index = 0;
         self.formula_input = value.clone();
         self.set_cell_input(row, col, value);
     }
 
     pub(crate) fn set_formula_buffer(&mut self, value: String) {
         self.completions_open = should_show_completions(&value);
+        self.completion_index = 0;
         self.formula_input = value;
+    }
+
+    pub(crate) fn move_completion_selection(&mut self, delta: isize, completion_count: usize) {
+        if completion_count == 0 {
+            self.completion_index = 0;
+            return;
+        }
+
+        self.completion_index = self
+            .completion_index
+            .saturating_add_signed(delta)
+            .min(completion_count - 1);
     }
 
     pub(crate) fn commit_formula_buffer(&mut self) {
