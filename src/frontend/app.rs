@@ -1,7 +1,7 @@
 use dioxus::prelude::Key;
 use dioxus::prelude::*;
 
-use super::components::{FormulaBar, MenuBar, SettingsDialog, SheetView, StatusBar};
+use super::components::{BottomPanel, FormulaBar, MenuBar, SettingsDialog, SheetView, StatusBar};
 use super::state::{AppState, ResizeKind};
 
 const APP_CSS: &str = include_str!("styles.css");
@@ -53,6 +53,7 @@ pub fn App() -> Element {
             MenuBar { state }
             FormulaBar { state }
             SheetView { state }
+            BottomPanel { state }
             SettingsDialog { state }
             StatusBar { state }
         }

@@ -1,3 +1,5 @@
+#[path = "components/bottom_panel.rs"]
+mod bottom_panel;
 #[path = "components/formula.rs"]
 mod formula;
 #[path = "components/menu.rs"]
@@ -7,6 +9,7 @@ mod sheet;
 #[path = "components/status.rs"]
 mod status;
 
+pub(crate) use bottom_panel::BottomPanel;
 pub(crate) use formula::FormulaBar;
 pub(crate) use menu::MenuBar;
 pub(crate) use sheet::SettingsDialog;

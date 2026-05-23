@@ -3,12 +3,14 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use crate::backend::settings::UserSettings;
 
 pub const PROVIDER_NAME: &str = "fal.image";
 pub const DEFAULT_MODEL: &str = "flux/dev";
+pub const OPENAI_GPT_IMAGE_2_MODEL: &str = "openai/gpt-image-2";
 pub const DEFAULT_OPENAI_IMAGE_QUALITY: ImageQuality = ImageQuality::Medium;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,7 +23,7 @@ impl FalImageModel {
     fn as_str(self) -> &'static str {
         match self {
             Self::FluxDev => "flux/dev",
-            Self::OpenAiGptImage2 => "openai/gpt-image-2",
+            Self::OpenAiGptImage2 => OPENAI_GPT_IMAGE_2_MODEL,
         }
     }
 }
@@ -70,7 +72,7 @@ struct QueueStatusResponse {
     status: String,
     #[serde(default)]
     queue_position: Option<u64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_queue_logs")]
     logs: Vec<QueueLogEntry>,
     #[serde(default)]
     error: Option<String>,
@@ -83,6 +85,13 @@ struct QueueStatusResponse {
 #[derive(Debug, Deserialize)]
 struct QueueLogEntry {
     message: String,
+}
+
+fn deserialize_queue_logs<'de, D>(deserializer: D) -> Result<Vec<QueueLogEntry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<Vec<QueueLogEntry>>::deserialize(deserializer).map(|logs| logs.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -144,7 +153,8 @@ impl FalImageClient {
             request.endpoint,
             request.model,
             request.prompt.len(),
-            serde_json::to_string(&request.input).unwrap_or_else(|_| "<unserializable>".to_string())
+            serde_json::to_string(&request.input)
+                .unwrap_or_else(|_| "<unserializable>".to_string())
         );
 
         let submit_url = format!("https://queue.fal.run/{}", request.endpoint);
@@ -154,26 +164,24 @@ impl FalImageClient {
             .header("Authorization", format!("Key {}", self.api_key))
             .json(&request.input)
             .send()
-            .await?
-            .error_for_status()?
-            .json::<QueueSubmitResponse>()
             .await?;
+        let submitted: QueueSubmitResponse =
+            decode_json_response(submitted, "submit fal image queue request").await?;
 
         eprintln!(
             "[fal.image] queued request request_id={} status_url={} response_url={}",
             submitted.request_id, submitted.status_url, submitted.response_url
         );
 
-        let response = loop {
+        let response: FalImageResponse = loop {
             let status = self
                 .http
                 .get(&submitted.status_url)
                 .header("Authorization", format!("Key {}", self.api_key))
                 .send()
-                .await?
-                .error_for_status()?
-                .json::<QueueStatusResponse>()
                 .await?;
+            let status: QueueStatusResponse =
+                decode_json_response(status, "read fal image queue status").await?;
 
             eprintln!(
                 "[fal.image] queue status request_id={} status={} queue_position={:?} logs={} error={:?} error_type={:?}",
@@ -186,15 +194,19 @@ impl FalImageClient {
             );
 
             match status.status.as_str() {
-                "COMPLETED" => break self
-                    .http
-                    .get(&submitted.response_url)
-                    .header("Authorization", format!("Key {}", self.api_key))
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .json::<FalImageResponse>()
-                    .await?,
+                "COMPLETED" => {
+                    let response_url = status
+                        .response_url
+                        .as_deref()
+                        .unwrap_or(&submitted.response_url);
+                    let response = self
+                        .http
+                        .get(response_url)
+                        .header("Authorization", format!("Key {}", self.api_key))
+                        .send()
+                        .await?;
+                    break decode_json_response(response, "fetch fal image queue response").await?;
+                }
                 "IN_QUEUE" | "IN_PROGRESS" => {
                     std::thread::sleep(Duration::from_secs(1));
                 }
@@ -220,6 +232,34 @@ impl FalImageClient {
         }
 
         Ok(response)
+    }
+}
+
+async fn decode_json_response<T: DeserializeOwned>(
+    response: reqwest::Response,
+    context: &str,
+) -> anyhow::Result<T> {
+    let status = response.status();
+    let body = response.text().await?;
+    if !status.is_success() {
+        anyhow::bail!("{context} failed with HTTP {status}: {}", body_excerpt(&body));
+    }
+
+    serde_json::from_str(&body).map_err(|error| {
+        anyhow::anyhow!(
+            "{context} returned an unexpected response: {error}; body: {}",
+            body_excerpt(&body)
+        )
+    })
+}
+
+fn body_excerpt(body: &str) -> String {
+    const MAX_CHARS: usize = 800;
+    let excerpt = body.chars().take(MAX_CHARS).collect::<String>();
+    if body.chars().count() > MAX_CHARS {
+        format!("{excerpt}...")
+    } else {
+        excerpt
     }
 }
 
@@ -252,7 +292,7 @@ impl GenerateImageRequest {
 fn parse_model(model: &str) -> anyhow::Result<FalImageModel> {
     match model.trim() {
         "" | DEFAULT_MODEL => Ok(FalImageModel::FluxDev),
-        "openai/gpt-image-2" => Ok(FalImageModel::OpenAiGptImage2),
+        OPENAI_GPT_IMAGE_2_MODEL => Ok(FalImageModel::OpenAiGptImage2),
         other => anyhow::bail!(
             "Unsupported GENERATEIMAGE model {other}. Use flux/dev or openai/gpt-image-2"
         ),

@@ -46,6 +46,9 @@ pub(crate) struct AppState {
     pub(crate) settings_open: bool,
     pub(crate) settings_fal_key: String,
     pub(crate) settings_path: Option<PathBuf>,
+    pub(crate) bottom_panel_tab: BottomPanelTab,
+    pub(crate) network_calls: Vec<NetworkCallRecord>,
+    next_network_call_id: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -67,6 +70,31 @@ pub(crate) enum CellInteractionMode {
     Display,
     Value,
     FormulaEdit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BottomPanelTab {
+    FunctionDocs,
+    NetworkCalls,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NetworkCallRecord {
+    pub(crate) id: u64,
+    pub(crate) cell: String,
+    pub(crate) function_name: String,
+    pub(crate) provider: String,
+    pub(crate) url: String,
+    pub(crate) status: NetworkCallStatus,
+    pub(crate) request_body: serde_json::Value,
+    pub(crate) image_inputs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NetworkCallStatus {
+    Running,
+    Completed,
+    Failed,
 }
 
 impl AppState {
@@ -100,6 +128,9 @@ impl AppState {
             settings_open: false,
             settings_fal_key,
             settings_path,
+            bottom_panel_tab: BottomPanelTab::FunctionDocs,
+            network_calls: Vec::new(),
+            next_network_call_id: 1,
         }
     }
 
@@ -168,10 +199,12 @@ impl AppState {
         input: String,
         cache_key: String,
         request: OpenRouterRequest,
+        network_call_id: u64,
     ) {
         let result = run_openrouter_request(&request).await;
 
         state.with_mut(|state| {
+            state.finish_network_call(network_call_id, result.is_ok());
             state.finish_llm_for_cell(row, col, input, cache_key, result);
         });
     }
@@ -183,10 +216,12 @@ impl AppState {
         input: String,
         cache_key: String,
         request: GenerateImageRequest,
+        network_call_id: u64,
     ) {
         let result = run_generate_image_request(&request).await;
 
         state.with_mut(|state| {
+            state.finish_network_call(network_call_id, result.is_ok());
             state.finish_generate_image_for_cell(row, col, input, cache_key, result);
         });
     }
@@ -195,7 +230,7 @@ impl AppState {
         &mut self,
         row: usize,
         col: usize,
-    ) -> Option<(usize, usize, String, String, OpenRouterRequest)> {
+    ) -> Option<(usize, usize, String, String, OpenRouterRequest, u64)> {
         let sheet = self.document.active_sheet()?;
         let cell = sheet.cell(row, col)?;
         if !llm_cell_is_runnable(&cell.value) {
@@ -232,15 +267,21 @@ impl AppState {
             );
         }
         self.status = format!("Running LLM for {}", cell_key(row, col));
+        let network_call_id = self.push_network_call(NetworkCallRecord::for_llm(
+            self.next_network_call_id,
+            row,
+            col,
+            &request,
+        ));
 
-        Some((row, col, input, cache_key, request))
+        Some((row, col, input, cache_key, request, network_call_id))
     }
 
     pub(crate) fn prepare_generate_image_for_cell(
         &mut self,
         row: usize,
         col: usize,
-    ) -> Option<(usize, usize, String, String, GenerateImageRequest)> {
+    ) -> Option<(usize, usize, String, String, GenerateImageRequest, u64)> {
         let sheet = self.document.active_sheet()?;
         let cell = sheet.cell(row, col)?;
         if !generate_image_cell_is_runnable(&cell.value) {
@@ -287,8 +328,14 @@ impl AppState {
             );
         }
         self.status = format!("Running image generation for {}", cell_key(row, col));
+        let network_call_id = self.push_network_call(NetworkCallRecord::for_generate_image(
+            self.next_network_call_id,
+            row,
+            col,
+            &request,
+        ));
 
-        Some((row, col, input, cache_key, request))
+        Some((row, col, input, cache_key, request, network_call_id))
     }
 
     pub(crate) fn finish_llm_for_cell(
@@ -583,6 +630,27 @@ impl AppState {
         }
     }
 
+    pub(crate) fn set_bottom_panel_tab(&mut self, tab: BottomPanelTab) {
+        self.bottom_panel_tab = tab;
+    }
+
+    fn push_network_call(&mut self, record: NetworkCallRecord) -> u64 {
+        let id = record.id;
+        self.next_network_call_id = self.next_network_call_id.wrapping_add(1).max(1);
+        self.network_calls.push(record);
+        id
+    }
+
+    fn finish_network_call(&mut self, id: u64, ok: bool) {
+        if let Some(record) = self.network_calls.iter_mut().find(|record| record.id == id) {
+            record.status = if ok {
+                NetworkCallStatus::Completed
+            } else {
+                NetworkCallStatus::Failed
+            };
+        }
+    }
+
     pub(crate) fn update_resize(&mut self, coordinate: i32) {
         let Some(resizing) = self.resizing else {
             return;
@@ -649,20 +717,101 @@ impl AppState {
     }
 }
 
-fn load_default_document_for_ui() -> (CashewDocument, Option<PathBuf>, Option<String>) {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("default_cashew.json");
-    match CashewDocument::load_json(&path) {
-        Ok(document) => (
-            document,
-            Some(path),
-            Some("Opened default_cashew.json".to_string()),
-        ),
-        Err(error) => (
-            CashewDocument::default(),
-            None,
-            Some(format!("Could not open default_cashew.json: {error}")),
-        ),
+impl NetworkCallRecord {
+    fn for_llm(id: u64, row: usize, col: usize, request: &OpenRouterRequest) -> Self {
+        Self {
+            id,
+            cell: cell_key(row, col),
+            function_name: "LLM".to_string(),
+            provider: "fal.openrouter".to_string(),
+            url: crate::backend::providers::openrouter::ENDPOINT.to_string(),
+            status: NetworkCallStatus::Running,
+            request_body: serde_json::to_value(request).unwrap_or(serde_json::Value::Null),
+            image_inputs: Vec::new(),
+        }
     }
+
+    fn for_generate_image(id: u64, row: usize, col: usize, request: &GenerateImageRequest) -> Self {
+        let image_inputs = image_inputs_from_body(&request.input);
+
+        Self {
+            id,
+            cell: cell_key(row, col),
+            function_name: "GENERATEIMAGE".to_string(),
+            provider: "fal.image".to_string(),
+            url: format!("https://queue.fal.run/{}", request.endpoint),
+            status: NetworkCallStatus::Running,
+            request_body: request_body_without_images(&request.input),
+            image_inputs,
+        }
+    }
+}
+
+fn image_inputs_from_body(body: &serde_json::Value) -> Vec<String> {
+    let mut images = Vec::new();
+
+    if let Some(image_url) = body.get("image_url").and_then(|value| value.as_str()) {
+        images.push(image_url.to_string());
+    }
+
+    if let Some(image_urls) = body.get("image_urls").and_then(|value| value.as_array()) {
+        images.extend(
+            image_urls
+                .iter()
+                .filter_map(|value| value.as_str())
+                .map(str::to_string),
+        );
+    }
+
+    images
+}
+
+fn request_body_without_images(body: &serde_json::Value) -> serde_json::Value {
+    let mut sanitized = body.clone();
+    if let Some(object) = sanitized.as_object_mut() {
+        if let Some(value) = object.get_mut("image_url") {
+            *value = serde_json::Value::String("<shown in Images>".to_string());
+        }
+        if let Some(value) = object.get_mut("image_urls") {
+            let count = value.as_array().map(Vec::len).unwrap_or(0);
+            *value = serde_json::Value::String(format!("<{count} images shown in Images>"));
+        }
+    }
+    sanitized
+}
+
+fn load_default_document_for_ui() -> (CashewDocument, Option<PathBuf>, Option<String>) {
+    for (index, path) in default_document_candidates().into_iter().enumerate() {
+        if let Ok(document) = CashewDocument::load_json(&path) {
+            let message = if index == 0 && home_dir_path().is_some() {
+                "Opened ~/default_cashew.json".to_string()
+            } else {
+                "Opened default_cashew.json".to_string()
+            };
+            return (document, Some(path), Some(message));
+        }
+    }
+
+    (
+        CashewDocument::default(),
+        None,
+        Some("Could not open ~/default_cashew.json or default_cashew.json".to_string()),
+    )
+}
+
+fn default_document_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Some(home_dir) = home_dir_path() {
+        candidates.push(home_dir.join("default_cashew.json"));
+    }
+
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("default_cashew.json"));
+    candidates
+}
+
+fn home_dir_path() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
 }
 
 pub(crate) fn cell_input(document: &CashewDocument, row: usize, col: usize) -> String {
@@ -1009,5 +1158,41 @@ mod tests {
         assert_eq!(state.editing_cell, None);
         assert!(!state.completions_open);
         assert_eq!(state.completion_index, 0);
+    }
+
+    #[test]
+    fn generate_image_network_record_extracts_and_sanitizes_images() {
+        let request = GenerateImageRequest::new(
+            "edit it",
+            "openai/gpt-image-2",
+            None,
+            vec![
+                "data:image/png;base64,abc".to_string(),
+                "https://example.com/ref.png".to_string(),
+            ],
+        )
+        .unwrap();
+
+        let record = NetworkCallRecord::for_generate_image(7, 1, 2, &request);
+
+        assert_eq!(record.cell, "C2");
+        assert_eq!(record.url, "https://queue.fal.run/openai/gpt-image-2/edit");
+        assert_eq!(record.image_inputs.len(), 2);
+        assert_eq!(
+            record.request_body["image_urls"],
+            "<2 images shown in Images>"
+        );
+    }
+
+    #[test]
+    fn openrouter_network_record_does_not_include_auth_data() {
+        let request = OpenRouterRequest::new("hello");
+
+        let record = NetworkCallRecord::for_llm(3, 0, 0, &request);
+        let body = serde_json::to_string(&record.request_body).unwrap();
+
+        assert_eq!(record.url, crate::backend::providers::openrouter::ENDPOINT);
+        assert!(!body.contains("Authorization"));
+        assert!(!body.contains("Key "));
     }
 }

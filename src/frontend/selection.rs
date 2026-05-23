@@ -109,9 +109,9 @@ impl AppState {
             && self.selected_cell_mode == CellInteractionMode::Value
         {
             let text = cell_value_for_copy(&self.document, range.start_row, range.start_col);
-        self.status = format!(
-            "Copied value from {}",
-            cell_key(range.start_row, range.start_col)
+            self.status = format!(
+                "Copied value from {}",
+                cell_key(range.start_row, range.start_col)
             );
             return text;
         }
@@ -170,7 +170,6 @@ impl AppState {
         );
         copied
     }
-
 }
 
 fn cell_value_for_copy(document: &CashewDocument, row: usize, col: usize) -> String {

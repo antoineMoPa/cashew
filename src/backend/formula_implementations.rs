@@ -2,7 +2,9 @@ use super::{
     document::{CellValue, Sheet},
     formulas::{FORMULA_FUNCTIONS, FormulaImplementation, MathFunction},
     providers::{
-        fal_image::{DEFAULT_MODEL as DEFAULT_IMAGE_MODEL, GenerateImageRequest, parse_image_quality},
+        fal_image::{
+            DEFAULT_MODEL as DEFAULT_IMAGE_MODEL, GenerateImageRequest, parse_image_quality,
+        },
         openrouter::{DEFAULT_MODEL, OpenRouterRequest},
     },
 };
@@ -646,7 +648,10 @@ mod tests {
 
         assert_eq!(request.input["quality"], "high");
         assert_eq!(request.quality.as_deref(), Some("high"));
-        assert_eq!(request.input["image_urls"][0], "https://example.com/ref.png");
+        assert_eq!(
+            request.input["image_urls"][0],
+            "https://example.com/ref.png"
+        );
     }
 
     #[test]

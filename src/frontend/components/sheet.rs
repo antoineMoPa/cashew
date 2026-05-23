@@ -14,6 +14,7 @@ type LlmWork = (
     String,
     String,
     crate::backend::providers::openrouter::OpenRouterRequest,
+    u64,
 );
 
 type GenerateImageWork = (
@@ -22,6 +23,7 @@ type GenerateImageWork = (
     String,
     String,
     crate::backend::providers::fal_image::GenerateImageRequest,
+    u64,
 );
 
 pub(crate) enum ProviderWork {
@@ -97,13 +99,17 @@ pub(crate) fn SheetView(mut state: Signal<AppState>) -> Element {
 
     let rows = sheet.rows.max(MIN_VISIBLE_ROWS);
     let cols = sheet.cols.max(MIN_VISIBLE_COLS);
-    let column_widths = (0..cols).map(|col| sheet.column_width(col)).collect::<Vec<_>>();
+    let column_widths = (0..cols)
+        .map(|col| sheet.column_width(col))
+        .collect::<Vec<_>>();
     let grid_columns = std::iter::once("46px".to_string())
         .chain(column_widths.iter().map(|width| format!("{width}px")))
         .collect::<Vec<_>>()
         .join(" ");
     let grid_style = format!("grid-template-columns: {grid_columns};");
-    let row_heights = (0..rows).map(|row| sheet.row_height(row)).collect::<Vec<_>>();
+    let row_heights = (0..rows)
+        .map(|row| sheet.row_height(row))
+        .collect::<Vec<_>>();
     let selected_cell = snapshot.selected_cell;
     let selection_range = snapshot.selection_range();
     let cell_modes = (0..rows)
@@ -652,7 +658,11 @@ pub(crate) fn accept_highlighted_formula_completion(state: &mut AppState) -> boo
     true
 }
 
-pub(crate) fn prepare_provider_work(state: &mut AppState, row: usize, col: usize) -> Option<ProviderWork> {
+pub(crate) fn prepare_provider_work(
+    state: &mut AppState,
+    row: usize,
+    col: usize,
+) -> Option<ProviderWork> {
     state
         .prepare_llm_for_cell(row, col)
         .map(ProviderWork::Llm)
@@ -665,15 +675,39 @@ pub(crate) fn prepare_provider_work(state: &mut AppState, row: usize, col: usize
 
 pub(crate) fn spawn_provider_work(state: Signal<AppState>, work: Option<ProviderWork>) {
     match work {
-        Some(ProviderWork::Llm((row, col, input, cache_key, request))) => {
+        Some(ProviderWork::Llm((row, col, input, cache_key, request, network_call_id))) => {
             spawn(async move {
-                AppState::run_llm_for_cell(state, row, col, input, cache_key, request).await;
+                AppState::run_llm_for_cell(
+                    state,
+                    row,
+                    col,
+                    input,
+                    cache_key,
+                    request,
+                    network_call_id,
+                )
+                .await;
             });
         }
-        Some(ProviderWork::GenerateImage((row, col, input, cache_key, request))) => {
+        Some(ProviderWork::GenerateImage((
+            row,
+            col,
+            input,
+            cache_key,
+            request,
+            network_call_id,
+        ))) => {
             spawn(async move {
-                AppState::run_generate_image_for_cell(state, row, col, input, cache_key, request)
-                    .await;
+                AppState::run_generate_image_for_cell(
+                    state,
+                    row,
+                    col,
+                    input,
+                    cache_key,
+                    request,
+                    network_call_id,
+                )
+                .await;
             });
         }
         None => {}

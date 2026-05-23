@@ -1,12 +1,10 @@
-use dioxus::prelude::*;
 use dioxus::prelude::Key;
+use dioxus::prelude::*;
 
-use crate::backend::formulas::{FormulaFunction, matching_functions};
 use crate::backend::document::cell_key;
+use crate::backend::formulas::{FormulaFunction, matching_functions};
 
-use super::super::state::{
-    AppState, should_show_completions,
-};
+use super::super::state::{AppState, should_show_completions};
 use super::sheet::{
     accept_highlighted_formula_completion, map_editor_text, prepare_provider_work,
     spawn_provider_work,
