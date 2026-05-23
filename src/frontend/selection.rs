@@ -1,15 +1,9 @@
-use crate::backend::document::{cell_key, column_name};
-
-use super::state::{
-    AppState, GROWTH_BUFFER_COLS, GROWTH_BUFFER_ROWS, cell_input, normalize_editor_text,
+use crate::backend::{
+    cache::{CacheStatus, CachedValue},
+    document::{CashewDocument, CellValue, cell_key},
 };
 
-#[derive(Debug, Clone)]
-pub(crate) struct CopiedCells {
-    pub(crate) origin: (usize, usize),
-    pub(crate) cells: Vec<Vec<String>>,
-    pub(crate) text: String,
-}
+use super::state::{AppState, CellInteractionMode, GROWTH_BUFFER_COLS, GROWTH_BUFFER_ROWS};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SelectionRange {
@@ -44,7 +38,8 @@ impl AppState {
         if !extend {
             self.selection_anchor = (row, col);
             self.selected_cell = (row, col);
-            self.formula_input = cell_input(&self.document, row, col);
+            self.selected_cell_mode = CellInteractionMode::Display;
+            self.refresh_formula_input_from_cell(row, col);
             self.completions_open = false;
             self.completion_index = 0;
         }
@@ -52,14 +47,22 @@ impl AppState {
         self.selecting = true;
     }
 
-    pub(crate) fn begin_cell_interaction(&mut self, row: usize, col: usize, extend: bool) {
+    pub(crate) fn begin_cell_interaction(&mut self, row: usize, col: usize, extend: bool) -> bool {
         if super::state::formula_accepts_cell_reference(&self.formula_input)
             && self.selected_cell != (row, col)
         {
             self.insert_cell_reference(row, col);
             self.selecting = false;
+            true
         } else {
+            let should_advance = self.selected_cell == (row, col) && !extend;
+            let previous_mode = self.selected_cell_mode;
             self.begin_selection(row, col, extend);
+            if should_advance {
+                self.selected_cell_mode = previous_mode;
+                self.advance_cell_mode(row, col);
+            }
+            false
         }
     }
 
@@ -87,8 +90,9 @@ impl AppState {
         self.ensure_work_area(next_row + GROWTH_BUFFER_ROWS, next_col + GROWTH_BUFFER_COLS);
         self.selection_end = (next_row, next_col);
         self.selected_cell = (next_row, next_col);
+        self.selected_cell_mode = CellInteractionMode::Display;
         self.editing_cell = None;
-        self.formula_input = cell_input(&self.document, next_row, next_col);
+        self.refresh_formula_input_from_cell(next_row, next_col);
         self.completions_open = false;
         self.completion_index = 0;
         self.selected_cell
@@ -100,6 +104,18 @@ impl AppState {
         };
 
         let range = self.selection_range();
+        if range.start_row == range.end_row
+            && range.start_col == range.end_col
+            && self.selected_cell_mode == CellInteractionMode::Value
+        {
+            let text = cell_value_for_copy(&self.document, range.start_row, range.start_col);
+        self.status = format!(
+            "Copied value from {}",
+            cell_key(range.start_row, range.start_col)
+            );
+            return text;
+        }
+
         let cells = (range.start_row..=range.end_row)
             .map(|row| {
                 (range.start_col..=range.end_col)
@@ -113,11 +129,6 @@ impl AppState {
             })
             .collect::<Vec<_>>();
         let text = cells_to_tsv(&cells);
-        self.copied_cells = Some(CopiedCells {
-            origin: (range.start_row, range.start_col),
-            cells,
-            text: text.clone(),
-        });
         self.status = format!(
             "Copied {}",
             range_label(
@@ -143,8 +154,9 @@ impl AppState {
         self.selection_anchor = (range.start_row, range.start_col);
         self.selection_end = (range.end_row, range.end_col);
         self.selected_cell = (range.start_row, range.start_col);
+        self.selected_cell_mode = CellInteractionMode::Display;
         self.editing_cell = None;
-        self.formula_input = cell_input(&self.document, range.start_row, range.start_col);
+        self.refresh_formula_input_from_cell(range.start_row, range.start_col);
         self.completions_open = false;
         self.completion_index = 0;
         self.status = format!(
@@ -159,65 +171,32 @@ impl AppState {
         copied
     }
 
-    pub(crate) fn paste_cells(&mut self, clipboard_text: &str) {
-        let (target_row, target_col) = self.selected_cell;
-        let pasted = match self
-            .copied_cells
-            .as_ref()
-            .filter(|copied| copied.text == clipboard_text)
-        {
-            Some(copied) => {
-                let row_delta = target_row as isize - copied.origin.0 as isize;
-                let col_delta = target_col as isize - copied.origin.1 as isize;
-                copied
-                    .cells
-                    .iter()
-                    .map(|row| {
-                        row.iter()
-                            .map(|value| shift_formula_references(value, row_delta, col_delta))
-                            .collect::<Vec<_>>()
-                    })
-                    .collect::<Vec<_>>()
+}
+
+fn cell_value_for_copy(document: &CashewDocument, row: usize, col: usize) -> String {
+    let Some(sheet) = document.active_sheet() else {
+        return String::new();
+    };
+    let Some(cell) = sheet.cell(row, col) else {
+        return String::new();
+    };
+
+    match &cell.value {
+        CellValue::Empty => String::new(),
+        CellValue::Text(value) | CellValue::Cached(value) => {
+            if let Some(cache_key) = cell.cache_key.as_ref() {
+                if let Some(entry) = document.cache.get(cache_key) {
+                    if entry.status == CacheStatus::Ready {
+                        if let CachedValue::MediaAsset(asset) = &entry.value {
+                            return asset.data_uri.clone().unwrap_or_else(|| asset.uri.clone());
+                        }
+                    }
+                }
             }
-            None => tsv_to_cells(clipboard_text),
-        };
-
-        if pasted.is_empty() || pasted.iter().all(|row| row.is_empty()) {
-            return;
+            value.clone()
         }
-
-        let row_count = pasted.len();
-        let col_count = pasted.iter().map(Vec::len).max().unwrap_or(0);
-        self.ensure_work_area(
-            target_row + row_count + GROWTH_BUFFER_ROWS,
-            target_col + col_count + GROWTH_BUFFER_COLS,
-        );
-
-        for (row_offset, row) in pasted.iter().enumerate() {
-            for (col_offset, value) in row.iter().enumerate() {
-                self.set_cell_input(
-                    target_row + row_offset,
-                    target_col + col_offset,
-                    value.clone(),
-                );
-            }
-        }
-
-        self.selection_anchor = (target_row, target_col);
-        self.selection_end = (
-            target_row + row_count.saturating_sub(1),
-            target_col + col_count.saturating_sub(1),
-        );
-        self.selected_cell = (target_row, target_col);
-        self.editing_cell = None;
-        self.formula_input = cell_input(&self.document, target_row, target_col);
-        self.completions_open = false;
-        self.completion_index = 0;
-        self.status = format!(
-            "Pasted {} cells at {}",
-            row_count * col_count,
-            cell_key(target_row, target_col)
-        );
+        CellValue::FormulaPending { message } => message.clone(),
+        CellValue::Error(error) => format!("#ERROR: {error}"),
     }
 }
 
@@ -239,205 +218,9 @@ fn cells_to_tsv(cells: &[Vec<String>]) -> String {
         .join("\n")
 }
 
-fn tsv_to_cells(text: &str) -> Vec<Vec<String>> {
-    text.trim_end_matches(['\r', '\n'])
-        .split('\n')
-        .map(|row| {
-            row.trim_end_matches('\r')
-                .split('\t')
-                .map(normalize_editor_text)
-                .collect::<Vec<_>>()
-        })
-        .collect()
-}
-
-fn shift_formula_references(input: &str, row_delta: isize, col_delta: isize) -> String {
-    if !input.trim_start().starts_with('=') {
-        return input.to_string();
-    }
-
-    let mut output = String::with_capacity(input.len());
-    let mut rest = input;
-
-    while let Some((start, end, reference)) = find_cell_reference(rest) {
-        output.push_str(&rest[..start]);
-        output.push_str(&shift_cell_reference(reference, row_delta, col_delta));
-        rest = &rest[end..];
-    }
-
-    output.push_str(rest);
-    output
-}
-
-fn find_cell_reference(input: &str) -> Option<(usize, usize, &str)> {
-    let bytes = input.as_bytes();
-    let mut index = 0;
-
-    while index < bytes.len() {
-        if bytes[index] == b'"' || bytes[index] == b'\'' {
-            index = skip_quoted_formula_text(bytes, index);
-            continue;
-        }
-
-        let start = index;
-        let col_absolute = bytes.get(index) == Some(&b'$');
-        if col_absolute {
-            index += 1;
-        }
-
-        let col_start = index;
-        while matches!(bytes.get(index), Some(b'A'..=b'Z') | Some(b'a'..=b'z')) {
-            index += 1;
-        }
-
-        if index == col_start || index - col_start > 3 {
-            index = start + 1;
-            continue;
-        }
-
-        let row_absolute = bytes.get(index) == Some(&b'$');
-        if row_absolute {
-            index += 1;
-        }
-
-        let row_start = index;
-        while matches!(bytes.get(index), Some(b'0'..=b'9')) {
-            index += 1;
-        }
-
-        if index == row_start {
-            index = start + 1;
-            continue;
-        }
-
-        if start > 0 && is_reference_name_char(bytes[start - 1]) {
-            index = start + 1;
-            continue;
-        }
-
-        if bytes
-            .get(index)
-            .copied()
-            .is_some_and(is_reference_name_char)
-        {
-            index = start + 1;
-            continue;
-        }
-
-        return Some((start, index, &input[start..index]));
-    }
-
-    None
-}
-
-fn skip_quoted_formula_text(bytes: &[u8], start: usize) -> usize {
-    let quote = bytes[start];
-    let mut index = start + 1;
-    while index < bytes.len() {
-        if bytes[index] == b'\\' {
-            index += 2;
-        } else if bytes[index] == quote {
-            return index + 1;
-        } else {
-            index += 1;
-        }
-    }
-    bytes.len()
-}
-
-fn is_reference_name_char(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'.'
-}
-
-fn shift_cell_reference(reference: &str, row_delta: isize, col_delta: isize) -> String {
-    let bytes = reference.as_bytes();
-    let mut index = 0;
-    let col_absolute = bytes.get(index) == Some(&b'$');
-    if col_absolute {
-        index += 1;
-    }
-
-    let col_start = index;
-    while matches!(bytes.get(index), Some(b'A'..=b'Z') | Some(b'a'..=b'z')) {
-        index += 1;
-    }
-    let col_name = &reference[col_start..index];
-
-    let row_absolute = bytes.get(index) == Some(&b'$');
-    if row_absolute {
-        index += 1;
-    }
-    let row_number = reference[index..].parse::<usize>().unwrap_or(1);
-
-    let col = column_index(col_name).unwrap_or(0);
-    let shifted_col = if col_absolute {
-        col
-    } else {
-        col.saturating_add_signed(col_delta)
-    };
-    let shifted_row = if row_absolute {
-        row_number.saturating_sub(1)
-    } else {
-        row_number
-            .saturating_sub(1)
-            .saturating_add_signed(row_delta)
-    };
-
-    format!(
-        "{}{}{}{}",
-        if col_absolute { "$" } else { "" },
-        column_name(shifted_col),
-        if row_absolute { "$" } else { "" },
-        shifted_row + 1
-    )
-}
-
-fn column_index(name: &str) -> Option<usize> {
-    let mut col = 0usize;
-    for byte in name.bytes() {
-        if !byte.is_ascii_alphabetic() {
-            return None;
-        }
-        col = col * 26 + (byte.to_ascii_uppercase() - b'A' + 1) as usize;
-    }
-    col.checked_sub(1)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn copied_formulas_shift_relative_references_only() {
-        assert_eq!(
-            shift_formula_references("=A1+$B1+C$1+$D$1", 2, 3),
-            "=D3+$B3+F$1+$D$1"
-        );
-        assert_eq!(
-            shift_formula_references("=LLM(\"keep A1\", A1)", 1, 1),
-            "=LLM(\"keep A1\", B2)"
-        );
-        assert_eq!(shift_formula_references("plain A1", 2, 3), "plain A1");
-    }
-
-    #[test]
-    fn paste_uses_internal_copy_origin_to_shift_formulas() {
-        let mut state = AppState::new();
-        state.set_cell_input(0, 0, "2".to_string());
-        state.set_cell_input(0, 1, "=A1".to_string());
-        state.begin_selection(0, 1, false);
-        state.finish_selection();
-        let copied = state.copy_selection();
-
-        state.set_selected_cell(1, 1);
-        state.paste_cells(&copied);
-
-        let sheet = state.document.active_sheet().unwrap();
-        assert_eq!(
-            sheet.cell(1, 1).map(|cell| cell.input.as_str()),
-            Some("=A2")
-        );
-    }
 
     #[test]
     fn cut_clears_selected_cells_after_copying() {

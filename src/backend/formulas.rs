@@ -31,12 +31,12 @@ pub enum MathFunction {
 pub const FORMULA_FUNCTIONS: &[FormulaFunction] = &[
     FormulaFunction {
         name: "GENERATEIMAGE",
-        signature: "GENERATEIMAGE(prompt, reference)",
-        insert_text: "=GENERATEIMAGE(prompt, reference)",
-        summary: "Generate or reuse an image from prompt inputs.",
-        details: "No-op for now. Later, resolved prompt and reference inputs will determine the cache key before any provider call.",
-        implementation: FormulaImplementation::NoopAi {
-            placeholder: "AI image generation is not implemented yet.",
+        signature: "GENERATEIMAGE(prompt, model, quality?, image...)",
+        insert_text: "=GENERATEIMAGE(prompt, \"flux/dev\")",
+        summary: "Generate or edit an image through fal.",
+        details: "Use model flux/dev for text-to-image speed or openai/gpt-image-2 for quality. OpenAI defaults to medium quality, and you can override it with low, medium, or high before any image URLs.",
+        implementation: FormulaImplementation::ProviderAi {
+            provider: "fal.image",
         },
     },
     FormulaFunction {

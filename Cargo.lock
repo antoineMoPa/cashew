@@ -464,6 +464,7 @@ name = "cashew"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "dioxus",
  "reqwest",
  "rfd 0.14.1",

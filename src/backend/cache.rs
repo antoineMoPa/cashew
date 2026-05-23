@@ -28,6 +28,8 @@ pub struct MediaAsset {
     pub provider: String,
     pub media_type: MediaType,
     pub uri: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_uri: Option<String>,
     pub metadata: serde_json::Value,
 }
 

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 dioxus = { version = "0.7.9", features = ["desktop"] }
 rfd = "0.14"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

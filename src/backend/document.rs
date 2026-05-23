@@ -50,7 +50,7 @@ impl CashewDocument {
         Self {
             version: 1,
             title: title.into(),
-            sheets: vec![Sheet::new("Storyboard", 12, 8)],
+            sheets: vec![Sheet::new("Default", 12, 8)],
             cache: BTreeMap::new(),
         }
     }
@@ -237,6 +237,16 @@ pub fn column_name(mut col: usize) -> String {
 mod tests {
     use super::*;
     use crate::backend::cache::stable_cache_key;
+
+    #[test]
+    fn default_sheet_is_named_default() {
+        let document = CashewDocument::default();
+
+        assert_eq!(
+            document.active_sheet().map(|sheet| sheet.name.as_str()),
+            Some("Default")
+        );
+    }
 
     #[test]
     fn document_round_trips_as_json() {
