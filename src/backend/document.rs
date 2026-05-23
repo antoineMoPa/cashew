@@ -118,6 +118,38 @@ impl Sheet {
                 cache_key: None,
             },
         );
+        self.recalculate_formulas();
+    }
+
+    pub fn recalculate_formulas(&mut self) {
+        const MAX_PASSES: usize = 8;
+
+        for _ in 0..MAX_PASSES {
+            let formulas = self
+                .cells
+                .iter()
+                .filter_map(|(key, cell)| {
+                    (cell.input.trim_start().starts_with('=')
+                        && !matches!(cell.value, CellValue::Cached(_))
+                        && cell.cache_key.is_none())
+                    .then(|| (key.clone(), cell.input.clone()))
+                })
+                .collect::<Vec<_>>();
+
+            let mut changed = false;
+            for (key, input) in formulas {
+                let value = formula_value_for_input(&input, self);
+                if let Some(cell) = self.cells.get_mut(&key) {
+                    changed |= cell.value != value;
+                    cell.value = value;
+                    cell.cache_key = None;
+                }
+            }
+
+            if !changed {
+                break;
+            }
+        }
     }
 
     pub fn set_cell_value_with_cache(
@@ -170,6 +202,14 @@ impl Sheet {
     pub fn ensure_size(&mut self, rows: usize, cols: usize) {
         self.rows = self.rows.max(rows);
         self.cols = self.cols.max(cols);
+    }
+}
+
+fn formula_value_for_input(input: &str, sheet: &Sheet) -> CellValue {
+    match evaluate_formula_for_sheet(input, sheet) {
+        Ok(FormulaValue::Number(number)) => CellValue::Text(format_number(number)),
+        Ok(FormulaValue::Pending(message)) => CellValue::FormulaPending { message },
+        Err(error) => CellValue::Error(error),
     }
 }
 
@@ -238,6 +278,39 @@ mod tests {
         assert_eq!(
             sheet.cell(1, 0).map(|cell| &cell.value),
             Some(&CellValue::Text("5".to_string()))
+        );
+    }
+
+    #[test]
+    fn recalculates_formulas_after_referenced_cell_changes() {
+        let mut sheet = Sheet::new("Math", 2, 4);
+        sheet.set_cell_input(1, 2, "2".to_string());
+        sheet.set_cell_input(1, 3, "=$C2*3".to_string());
+        sheet.set_cell_input(1, 2, "5".to_string());
+
+        assert_eq!(
+            sheet.cell(1, 3).map(|cell| &cell.value),
+            Some(&CellValue::Text("15".to_string()))
+        );
+    }
+
+    #[test]
+    fn recalculation_preserves_cached_provider_results() {
+        let mut sheet = Sheet::new("LLM", 1, 2);
+        sheet.set_cell_value_with_cache(
+            0,
+            0,
+            "=LLM(B1)".to_string(),
+            CellValue::Cached("cached".to_string()),
+            Some("cache-key".to_string()),
+        );
+        sheet.recalculate_formulas();
+
+        assert_eq!(
+            sheet
+                .cell(0, 0)
+                .map(|cell| (&cell.value, cell.cache_key.as_deref())),
+            Some((&CellValue::Cached("cached".to_string()), Some("cache-key")))
         );
     }
 }

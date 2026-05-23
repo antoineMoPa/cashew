@@ -188,6 +188,10 @@ fn FormulaCompletions(mut state: Signal<AppState>) -> Element {
 
 #[component]
 pub(crate) fn SheetView(mut state: Signal<AppState>) -> Element {
+    use_effect(move || {
+        install_clipboard_bridge();
+    });
+
     let snapshot = state.read();
     let Some(sheet) = snapshot.document.active_sheet() else {
         return rsx! { div { class: "empty-sheet", "No sheet" } };
@@ -365,9 +369,10 @@ fn CellEditor(
                     return;
                 }
 
-                if shortcut_key(&event, "v") {
+                if shortcut_key(&event, "x") {
                     event.prevent_default();
-                    paste_from_clipboard(state);
+                    let copied_text = state.with_mut(AppState::cut_selection);
+                    write_clipboard(copied_text);
                     return;
                 }
 
@@ -433,6 +438,10 @@ fn CellEditor(
             oninput: move |event| {
                 let value = normalize_editor_text(event.value());
                 state.with_mut(|state| state.set_cell_input(row, col, value));
+            },
+            onpaste: move |event| {
+                event.prevent_default();
+                paste_from_clipboard_event(state);
             }
         }
     }
@@ -489,6 +498,26 @@ fn focus_cell(row: usize, col: usize) {
     let _ = dioxus::document::eval(&script);
 }
 
+fn install_clipboard_bridge() {
+    let script = r#"
+        if (!window.__cashewPasteBridgeInstalled) {
+            window.__cashewPasteBridgeInstalled = true;
+            window.__cashewLastPaste = "";
+            document.addEventListener("paste", (event) => {
+                const active = document.activeElement;
+                if (!active || !active.classList || !active.classList.contains("cell")) {
+                    return;
+                }
+
+                const clipboard = event.clipboardData || window.clipboardData;
+                window.__cashewLastPaste = clipboard ? clipboard.getData("text/plain") : "";
+                event.preventDefault();
+            }, true);
+        }
+    "#;
+    let _ = dioxus::document::eval(script);
+}
+
 fn shortcut_key(event: &KeyboardEvent, expected: &str) -> bool {
     let modifiers = event.modifiers();
     if !modifiers.ctrl() && !modifiers.meta() {
@@ -526,14 +555,9 @@ fn write_clipboard(text: String) {
     let _ = dioxus::document::eval(&script);
 }
 
-fn paste_from_clipboard(mut state: Signal<AppState>) {
+fn paste_from_clipboard_event(mut state: Signal<AppState>) {
     spawn(async move {
-        let script = r#"
-            if (navigator.clipboard && navigator.clipboard.readText) {
-                return await navigator.clipboard.readText();
-            }
-            return "";
-        "#;
+        let script = r#"return window.__cashewLastPaste || "";"#;
         if let Ok(text) = dioxus::document::eval(script).await {
             state.with_mut(|state| state.paste_cells(text.as_str().unwrap_or_default()));
         }
