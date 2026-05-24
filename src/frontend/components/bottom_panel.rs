@@ -1,8 +1,13 @@
 use dioxus::prelude::*;
 
-use crate::backend::formulas::{FormulaFunction, function_for_formula_input};
+use crate::backend::formulas::{
+    FormulaFunction, FormulaModelDoc, formula_example_for_function, function_for_formula_input,
+    models_for_function,
+};
 
-use super::super::state::{AppState, BottomPanelTab, NetworkCallRecord, NetworkCallStatus};
+use super::super::state::{
+    AppState, BottomPanelTab, NetworkCallRecord, NetworkCallStatus, ResizeDrag, ResizeKind,
+};
 
 #[component]
 pub(crate) fn BottomPanel(mut state: Signal<AppState>) -> Element {
@@ -10,20 +15,39 @@ pub(crate) fn BottomPanel(mut state: Signal<AppState>) -> Element {
     let active_tab = snapshot.bottom_panel_tab;
     let formula_input = snapshot.formula_input.clone();
     let calls = snapshot.network_calls.clone();
+    let bottom_panel_height = snapshot.bottom_panel_height;
     drop(snapshot);
 
     rsx! {
         section { class: "bottom-panel",
             div { class: "bottom-tabs",
-                TabButton {
-                    label: "Docs",
-                    active: active_tab == BottomPanelTab::FunctionDocs,
-                    onclick: move |_| state.with_mut(|state| state.set_bottom_panel_tab(BottomPanelTab::FunctionDocs)),
+                div {
+                    class: "bottom-panel-resize-handle",
+                    onmousedown: move |event| {
+                        event.prevent_default();
+                        event.stop_propagation();
+                        let start = event.client_coordinates().y as i32;
+                        state.with_mut(|state| {
+                            state.resizing = Some(ResizeDrag {
+                                kind: ResizeKind::BottomPanel,
+                                index: 0,
+                                start,
+                                original: bottom_panel_height,
+                            });
+                        });
+                    }
                 }
-                TabButton {
-                    label: "Network Calls",
-                    active: active_tab == BottomPanelTab::NetworkCalls,
-                    onclick: move |_| state.with_mut(|state| state.set_bottom_panel_tab(BottomPanelTab::NetworkCalls)),
+                div { class: "bottom-tabs-row",
+                    TabButton {
+                        label: "Docs",
+                        active: active_tab == BottomPanelTab::FunctionDocs,
+                        onclick: move |_| state.with_mut(|state| state.set_bottom_panel_tab(BottomPanelTab::FunctionDocs)),
+                    }
+                    TabButton {
+                        label: "Network Calls",
+                        active: active_tab == BottomPanelTab::NetworkCalls,
+                        onclick: move |_| state.with_mut(|state| state.set_bottom_panel_tab(BottomPanelTab::NetworkCalls)),
+                    }
                 }
             }
             div { class: "bottom-panel-body",
@@ -69,6 +93,20 @@ fn FunctionDocsPanel(formula_input: String) -> Element {
         };
     };
 
+    let models = models_for_function(function);
+    let selected_model = use_signal(|| None::<String>);
+    let active_model_id = selected_model
+        .read()
+        .clone()
+        .filter(|candidate| models.iter().any(|model| model.id == candidate))
+        .or_else(|| {
+            models
+                .iter()
+                .find(|model| model.default)
+                .map(|model| model.id.to_string())
+        });
+    let example_formula = formula_example_for_function(function, active_model_id.as_deref());
+
     rsx! {
         div { class: "function-docs",
             div { class: "doc-header",
@@ -76,11 +114,11 @@ fn FunctionDocsPanel(formula_input: String) -> Element {
                     div { class: "doc-title", "{function.name}" }
                     div { class: "doc-summary", "{function.summary}" }
                 }
-                code { class: "doc-signature", "{function.signature}" }
+                code { class: "doc-signature", "{example_formula}" }
             }
             div { class: "doc-grid",
                 DocArguments { function }
-                DocModels { function }
+                DocModels { selected_model, active_model_id, models }
                 DocNotes { function }
             }
         }
@@ -113,24 +151,50 @@ fn DocArguments(function: FormulaFunction) -> Element {
 }
 
 #[component]
-fn DocModels(function: FormulaFunction) -> Element {
+fn DocModels(
+    mut selected_model: Signal<Option<String>>,
+    active_model_id: Option<String>,
+    models: Vec<FormulaModelDoc>,
+) -> Element {
     rsx! {
         section { class: "doc-section",
             h3 { "Models" }
-            if function.models.is_empty() {
+            if models.is_empty() {
                 div { class: "doc-muted", "No model list for this function." }
             } else {
                 div { class: "model-list",
-                    for model in function.models {
-                        div { class: "model-item",
-                            div { class: "model-heading",
-                                code { "{model.id}" }
-                                if model.default {
-                                    span { class: "doc-chip default", "default" }
+                    for model in models {
+                        {
+                            let is_selected = active_model_id
+                                .as_deref()
+                                .map(|value| value == model.id)
+                                .unwrap_or(false);
+                            let class = if is_selected {
+                                "model-item selected"
+                            } else {
+                                "model-item"
+                            };
+
+                            rsx! {
+                                button {
+                                    class,
+                                    onmousedown: move |event| {
+                                        event.prevent_default();
+                                        event.stop_propagation();
+                                    },
+                                    onclick: move |_| {
+                                        selected_model.set(Some(model.id.to_string()));
+                                    },
+                                    div { class: "model-heading",
+                                        code { "{model.id}" }
+                                        if model.default {
+                                            span { class: "doc-chip default", "default" }
+                                        }
+                                    }
+                                    div { class: "model-label", "{model.label}" }
+                                    div { class: "doc-description", "{model.description}" }
                                 }
                             }
-                            div { class: "model-label", "{model.label}" }
-                            div { class: "doc-description", "{model.description}" }
                         }
                     }
                 }
@@ -179,6 +243,7 @@ fn NetworkCallsPanel(calls: Vec<NetworkCallRecord>) -> Element {
 #[component]
 fn NetworkCallItem(call: NetworkCallRecord) -> Element {
     let status = match call.status {
+        NetworkCallStatus::PendingApproval => "pending",
         NetworkCallStatus::Running => "running",
         NetworkCallStatus::Completed => "completed",
         NetworkCallStatus::Failed => "failed",

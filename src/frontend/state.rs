@@ -1,24 +1,36 @@
-use std::{path::PathBuf, time::Duration};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+    time::Duration,
+};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use dioxus::prelude::WritableExt;
 
+use super::components::ProviderWork;
 use crate::backend::cache::{
     CacheEntry, CacheStatus, CachedValue, MediaAsset, MediaType, stable_cache_key,
 };
 use crate::backend::document::{CashewDocument, CellValue, cell_key, column_name};
 use crate::backend::formula_implementations::{
-    generate_image_request_for_sheet, llm_request_for_sheet,
+    concatenate_video_inputs_for_sheet, generate_image_request_for_sheet,
+    generate_video_request_for_sheet, llm_request_for_sheet,
 };
 use crate::backend::formulas::FormulaFunction;
 use crate::backend::providers::fal_image::{FalImageClient, GenerateImageRequest};
+use crate::backend::providers::fal_video::{FalVideoClient, GenerateVideoRequest};
 use crate::backend::providers::openrouter::{OpenRouterClient, OpenRouterRequest};
 use crate::backend::settings::{UserSettings, settings_path};
 
 const MIN_COLUMN_WIDTH: i32 = 72;
 const MIN_ROW_HEIGHT: i32 = 24;
+const MIN_BOTTOM_PANEL_HEIGHT: i32 = 120;
+const DEFAULT_BOTTOM_PANEL_HEIGHT: i32 = 220;
 const GENERATED_IMAGE_COLUMN_WIDTH: u16 = 180;
 const GENERATED_IMAGE_ROW_HEIGHT: u16 = 160;
+const GENERATED_VIDEO_COLUMN_WIDTH: u16 = 240;
+const GENERATED_VIDEO_ROW_HEIGHT: u16 = 180;
 
 pub(crate) const MIN_VISIBLE_ROWS: usize = 100;
 pub(crate) const MIN_VISIBLE_COLS: usize = 26;
@@ -41,6 +53,7 @@ pub(crate) struct AppState {
     pub(crate) formula_input: String,
     pub(crate) formula_input_revision: u64,
     pub(crate) resizing: Option<ResizeDrag>,
+    pub(crate) bottom_panel_height: i32,
     pub(crate) completions_open: bool,
     pub(crate) completion_index: usize,
     pub(crate) settings_open: bool,
@@ -48,6 +61,7 @@ pub(crate) struct AppState {
     pub(crate) settings_path: Option<PathBuf>,
     pub(crate) bottom_panel_tab: BottomPanelTab,
     pub(crate) network_calls: Vec<NetworkCallRecord>,
+    pub(crate) pending_provider_calls: Vec<QueuedProviderCall>,
     next_network_call_id: u64,
 }
 
@@ -63,6 +77,7 @@ pub(crate) struct ResizeDrag {
 pub(crate) enum ResizeKind {
     Column,
     Row,
+    BottomPanel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +91,11 @@ pub(crate) enum CellInteractionMode {
 pub(crate) enum BottomPanelTab {
     FunctionDocs,
     NetworkCalls,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct QueuedProviderCall {
+    pub(crate) work: ProviderWork,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +112,7 @@ pub(crate) struct NetworkCallRecord {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NetworkCallStatus {
+    PendingApproval,
     Running,
     Completed,
     Failed,
@@ -123,6 +144,7 @@ impl AppState {
             formula_input,
             formula_input_revision: 0,
             resizing: None,
+            bottom_panel_height: DEFAULT_BOTTOM_PANEL_HEIGHT,
             completions_open: false,
             completion_index: 0,
             settings_open: false,
@@ -130,6 +152,7 @@ impl AppState {
             settings_path,
             bottom_panel_tab: BottomPanelTab::FunctionDocs,
             network_calls: Vec::new(),
+            pending_provider_calls: Vec::new(),
             next_network_call_id: 1,
         }
     }
@@ -226,6 +249,61 @@ impl AppState {
         });
     }
 
+    pub(crate) async fn run_generate_video_for_cell(
+        mut state: dioxus::prelude::Signal<Self>,
+        row: usize,
+        col: usize,
+        input: String,
+        cache_key: String,
+        request: GenerateVideoRequest,
+        network_call_id: u64,
+    ) {
+        let result = run_generate_video_request(&request).await;
+
+        state.with_mut(|state| {
+            state.finish_network_call(network_call_id, result.is_ok());
+            state.finish_generate_video_for_cell(row, col, input, cache_key, result);
+        });
+    }
+
+    pub(crate) async fn run_concatenate_video_for_cell(
+        mut state: dioxus::prelude::Signal<Self>,
+        row: usize,
+        col: usize,
+        input: String,
+        cache_key: String,
+        video_inputs: Vec<String>,
+    ) {
+        let result = run_concatenate_video_request(&video_inputs).await;
+
+        state.with_mut(|state| {
+            state.finish_concatenate_video_for_cell(row, col, input, cache_key, result);
+        });
+    }
+
+    pub(crate) fn queue_pending_provider_call(&mut self, work: ProviderWork) {
+        self.pending_provider_calls.push(QueuedProviderCall { work });
+        self.status = "Queued provider call for approval".to_string();
+    }
+
+    pub(crate) fn dispatch_pending_provider_calls(&mut self) -> Vec<ProviderWork> {
+        let pending = std::mem::take(&mut self.pending_provider_calls);
+        if pending.is_empty() {
+            self.status = "No pending provider calls".to_string();
+            return Vec::new();
+        }
+
+        self.status = format!("Running {} pending provider calls", pending.len());
+
+        pending
+            .into_iter()
+            .map(|pending_call| {
+                self.start_pending_provider_work(&pending_call.work);
+                pending_call.work
+            })
+            .collect()
+    }
+
     pub(crate) fn prepare_llm_for_cell(
         &mut self,
         row: usize,
@@ -271,6 +349,7 @@ impl AppState {
             self.next_network_call_id,
             row,
             col,
+            NetworkCallStatus::Running,
             &request,
         ));
 
@@ -281,6 +360,7 @@ impl AppState {
         &mut self,
         row: usize,
         col: usize,
+        approval_required: bool,
     ) -> Option<(usize, usize, String, String, GenerateImageRequest, u64)> {
         let sheet = self.document.active_sheet()?;
         let cell = sheet.cell(row, col)?;
@@ -316,26 +396,171 @@ impl AppState {
             return None;
         }
 
+        let pending_message = if approval_required {
+            "fal.image request is pending approval".to_string()
+        } else {
+            "Running image generation...".to_string()
+        };
         if let Some(sheet) = self.document.active_sheet_mut() {
             sheet.set_cell_value_with_cache(
                 row,
                 col,
                 input.clone(),
                 CellValue::FormulaPending {
-                    message: "Running image generation...".to_string(),
+                    message: pending_message,
                 },
                 Some(cache_key.clone()),
             );
         }
-        self.status = format!("Running image generation for {}", cell_key(row, col));
+        self.status = if approval_required {
+            format!("Queued image generation for {}", cell_key(row, col))
+        } else {
+            format!("Running image generation for {}", cell_key(row, col))
+        };
         let network_call_id = self.push_network_call(NetworkCallRecord::for_generate_image(
             self.next_network_call_id,
             row,
             col,
+            if approval_required {
+                NetworkCallStatus::PendingApproval
+            } else {
+                NetworkCallStatus::Running
+            },
             &request,
         ));
 
         Some((row, col, input, cache_key, request, network_call_id))
+    }
+
+    pub(crate) fn prepare_generate_video_for_cell(
+        &mut self,
+        row: usize,
+        col: usize,
+        approval_required: bool,
+    ) -> Option<(usize, usize, String, String, GenerateVideoRequest, u64)> {
+        let sheet = self.document.active_sheet()?;
+        let cell = sheet.cell(row, col)?;
+        if !generate_video_cell_is_runnable(&cell.value) {
+            return None;
+        }
+
+        let input = cell.input.clone();
+        let request = match generate_video_request_for_sheet(&input, sheet) {
+            Ok(Some(request)) => request,
+            Ok(None) => return None,
+            Err(error) => {
+                if let Some(sheet) = self.document.active_sheet_mut() {
+                    sheet.set_cell_value_with_cache(row, col, input, CellValue::Error(error), None);
+                }
+                self.dirty = true;
+                return None;
+            }
+        };
+        let cache_key = generate_video_cache_key(&input, &request);
+
+        if let Some(cached) = cached_media_cell_value(&self.document, &cache_key) {
+            if let Some(sheet) = self.document.active_sheet_mut() {
+                sheet.set_cell_value_with_cache(
+                    row,
+                    col,
+                    input,
+                    CellValue::Cached(cached),
+                    Some(cache_key),
+                );
+            }
+            self.status = format!("Used cached video result for {}", cell_key(row, col));
+            return None;
+        }
+
+        let pending_message = if approval_required {
+            "fal.video request is pending approval".to_string()
+        } else {
+            "Running video generation...".to_string()
+        };
+        if let Some(sheet) = self.document.active_sheet_mut() {
+            sheet.set_cell_value_with_cache(
+                row,
+                col,
+                input.clone(),
+                CellValue::FormulaPending {
+                    message: pending_message,
+                },
+                Some(cache_key.clone()),
+            );
+        }
+        self.status = if approval_required {
+            format!("Queued video generation for {}", cell_key(row, col))
+        } else {
+            format!("Running video generation for {}", cell_key(row, col))
+        };
+        let network_call_id = self.push_network_call(NetworkCallRecord::for_generate_video(
+            self.next_network_call_id,
+            row,
+            col,
+            if approval_required {
+                NetworkCallStatus::PendingApproval
+            } else {
+                NetworkCallStatus::Running
+            },
+            &request,
+        ));
+
+        Some((row, col, input, cache_key, request, network_call_id))
+    }
+
+    pub(crate) fn prepare_concatenate_video_for_cell(
+        &mut self,
+        row: usize,
+        col: usize,
+    ) -> Option<(usize, usize, String, String, Vec<String>)> {
+        let sheet = self.document.active_sheet()?;
+        let cell = sheet.cell(row, col)?;
+        if !concatenate_video_cell_is_runnable(&cell.value) {
+            return None;
+        }
+
+        let input = cell.input.clone();
+        let video_inputs = match concatenate_video_inputs_for_sheet(&input, sheet) {
+            Ok(Some(video_inputs)) => video_inputs,
+            Ok(None) => return None,
+            Err(error) => {
+                if let Some(sheet) = self.document.active_sheet_mut() {
+                    sheet.set_cell_value_with_cache(row, col, input, CellValue::Error(error), None);
+                }
+                self.dirty = true;
+                return None;
+            }
+        };
+        let cache_key = concatenate_video_cache_key(&input, &video_inputs);
+
+        if let Some(cached) = cached_media_cell_value(&self.document, &cache_key) {
+            if let Some(sheet) = self.document.active_sheet_mut() {
+                sheet.set_cell_value_with_cache(
+                    row,
+                    col,
+                    input,
+                    CellValue::Cached(cached),
+                    Some(cache_key),
+                );
+            }
+            self.status = format!("Used cached concatenated video for {}", cell_key(row, col));
+            return None;
+        }
+
+        if let Some(sheet) = self.document.active_sheet_mut() {
+            sheet.set_cell_value_with_cache(
+                row,
+                col,
+                input.clone(),
+                CellValue::FormulaPending {
+                    message: "Concatenating video clips...".to_string(),
+                },
+                Some(cache_key.clone()),
+            );
+        }
+        self.status = format!("Concatenating video clips for {}", cell_key(row, col));
+
+        Some((row, col, input, cache_key, video_inputs))
     }
 
     pub(crate) fn finish_llm_for_cell(
@@ -428,6 +653,114 @@ impl AppState {
             ) {
                 let width = sheet.column_width(col).max(GENERATED_IMAGE_COLUMN_WIDTH);
                 let height = sheet.row_height(row).max(GENERATED_IMAGE_ROW_HEIGHT);
+                sheet.set_column_width(col, width);
+                sheet.set_row_height(row, height);
+            }
+            sheet.recalculate_formulas();
+            self.dirty = true;
+        }
+    }
+
+    pub(crate) fn finish_generate_video_for_cell(
+        &mut self,
+        row: usize,
+        col: usize,
+        input: String,
+        cache_key: String,
+        result: anyhow::Result<MediaAsset>,
+    ) {
+        let value = match result {
+            Ok(asset) => {
+                let uri = asset.uri.clone();
+                self.document.cache.insert(
+                    cache_key.clone(),
+                    CacheEntry {
+                        key: cache_key.clone(),
+                        status: CacheStatus::Ready,
+                        value: CachedValue::MediaAsset(asset),
+                    },
+                );
+                self.status = format!("Video generation completed for {}", cell_key(row, col));
+                CellValue::Cached(uri)
+            }
+            Err(error) => {
+                self.document.cache.insert(
+                    cache_key.clone(),
+                    CacheEntry {
+                        key: cache_key.clone(),
+                        status: CacheStatus::Failed {
+                            message: error.to_string(),
+                        },
+                        value: CachedValue::Json(serde_json::Value::Null),
+                    },
+                );
+                self.status = format!("Video generation failed for {}", cell_key(row, col));
+                CellValue::Error(error.to_string())
+            }
+        };
+
+        if let Some(sheet) = self.document.active_sheet_mut() {
+            sheet.set_cell_value_with_cache(row, col, input, value, Some(cache_key));
+            if matches!(
+                sheet.cell(row, col).map(|cell| &cell.value),
+                Some(CellValue::Cached(_))
+            ) {
+                let width = sheet.column_width(col).max(GENERATED_VIDEO_COLUMN_WIDTH);
+                let height = sheet.row_height(row).max(GENERATED_VIDEO_ROW_HEIGHT);
+                sheet.set_column_width(col, width);
+                sheet.set_row_height(row, height);
+            }
+            sheet.recalculate_formulas();
+            self.dirty = true;
+        }
+    }
+
+    pub(crate) fn finish_concatenate_video_for_cell(
+        &mut self,
+        row: usize,
+        col: usize,
+        input: String,
+        cache_key: String,
+        result: anyhow::Result<MediaAsset>,
+    ) {
+        let value = match result {
+            Ok(asset) => {
+                let uri = asset.uri.clone();
+                self.document.cache.insert(
+                    cache_key.clone(),
+                    CacheEntry {
+                        key: cache_key.clone(),
+                        status: CacheStatus::Ready,
+                        value: CachedValue::MediaAsset(asset),
+                    },
+                );
+                self.status = format!("Video concatenation completed for {}", cell_key(row, col));
+                CellValue::Cached(uri)
+            }
+            Err(error) => {
+                self.document.cache.insert(
+                    cache_key.clone(),
+                    CacheEntry {
+                        key: cache_key.clone(),
+                        status: CacheStatus::Failed {
+                            message: error.to_string(),
+                        },
+                        value: CachedValue::Json(serde_json::Value::Null),
+                    },
+                );
+                self.status = format!("Video concatenation failed for {}", cell_key(row, col));
+                CellValue::Error(error.to_string())
+            }
+        };
+
+        if let Some(sheet) = self.document.active_sheet_mut() {
+            sheet.set_cell_value_with_cache(row, col, input, value, Some(cache_key));
+            if matches!(
+                sheet.cell(row, col).map(|cell| &cell.value),
+                Some(CellValue::Cached(_))
+            ) {
+                let width = sheet.column_width(col).max(GENERATED_VIDEO_COLUMN_WIDTH);
+                let height = sheet.row_height(row).max(GENERATED_VIDEO_ROW_HEIGHT);
                 sheet.set_column_width(col, width);
                 sheet.set_row_height(row, height);
             }
@@ -657,20 +990,29 @@ impl AppState {
         };
 
         let delta = coordinate - resizing.start;
-        let size = resizing.original + delta;
+        let size = match resizing.kind {
+            ResizeKind::BottomPanel => resizing.original - delta,
+            _ => resizing.original + delta,
+        };
 
-        if let Some(sheet) = self.document.active_sheet_mut() {
-            match resizing.kind {
-                ResizeKind::Column => {
+        match resizing.kind {
+            ResizeKind::Column => {
+                if let Some(sheet) = self.document.active_sheet_mut() {
                     let width = size.max(MIN_COLUMN_WIDTH).min(u16::MAX as i32) as u16;
                     sheet.set_column_width(resizing.index, width);
-                }
-                ResizeKind::Row => {
-                    let height = size.max(MIN_ROW_HEIGHT).min(u16::MAX as i32) as u16;
-                    sheet.set_row_height(resizing.index, height);
+                    self.dirty = true;
                 }
             }
-            self.dirty = true;
+            ResizeKind::Row => {
+                if let Some(sheet) = self.document.active_sheet_mut() {
+                    let height = size.max(MIN_ROW_HEIGHT).min(u16::MAX as i32) as u16;
+                    sheet.set_row_height(resizing.index, height);
+                    self.dirty = true;
+                }
+            }
+            ResizeKind::BottomPanel => {
+                self.bottom_panel_height = size.max(MIN_BOTTOM_PANEL_HEIGHT);
+            }
         }
     }
 
@@ -718,20 +1060,32 @@ impl AppState {
 }
 
 impl NetworkCallRecord {
-    fn for_llm(id: u64, row: usize, col: usize, request: &OpenRouterRequest) -> Self {
+    fn for_llm(
+        id: u64,
+        row: usize,
+        col: usize,
+        status: NetworkCallStatus,
+        request: &OpenRouterRequest,
+    ) -> Self {
         Self {
             id,
             cell: cell_key(row, col),
             function_name: "LLM".to_string(),
             provider: "fal.openrouter".to_string(),
             url: crate::backend::providers::openrouter::ENDPOINT.to_string(),
-            status: NetworkCallStatus::Running,
+            status,
             request_body: serde_json::to_value(request).unwrap_or(serde_json::Value::Null),
             image_inputs: Vec::new(),
         }
     }
 
-    fn for_generate_image(id: u64, row: usize, col: usize, request: &GenerateImageRequest) -> Self {
+    fn for_generate_image(
+        id: u64,
+        row: usize,
+        col: usize,
+        status: NetworkCallStatus,
+        request: &GenerateImageRequest,
+    ) -> Self {
         let image_inputs = image_inputs_from_body(&request.input);
 
         Self {
@@ -739,10 +1093,106 @@ impl NetworkCallRecord {
             cell: cell_key(row, col),
             function_name: "GENERATEIMAGE".to_string(),
             provider: "fal.image".to_string(),
-            url: format!("https://queue.fal.run/{}", request.endpoint),
-            status: NetworkCallStatus::Running,
+            url: format!(
+                "{}/{}",
+                request.queue_api_base.trim_end_matches('/'),
+                request.endpoint
+            ),
+            status,
             request_body: request_body_without_images(&request.input),
             image_inputs,
+        }
+    }
+
+    fn for_generate_video(
+        id: u64,
+        row: usize,
+        col: usize,
+        status: NetworkCallStatus,
+        request: &GenerateVideoRequest,
+    ) -> Self {
+        Self {
+            id,
+            cell: cell_key(row, col),
+            function_name: "GENERATEVIDEO".to_string(),
+            provider: "fal.video".to_string(),
+            url: format!(
+                "{}/{}",
+                request.queue_api_base.trim_end_matches('/'),
+                request.endpoint
+            ),
+            status,
+            request_body: request_body_without_images(&request.input),
+            image_inputs: image_inputs_from_body(&request.input),
+        }
+    }
+}
+
+impl AppState {
+    fn start_pending_provider_work(&mut self, work: &ProviderWork) {
+        match work {
+            ProviderWork::Llm((row, col, input, cache_key, _, network_call_id)) => {
+                if let Some(sheet) = self.document.active_sheet_mut() {
+                    sheet.set_cell_value_with_cache(
+                        *row,
+                        *col,
+                        (*input).clone(),
+                        CellValue::FormulaPending {
+                            message: "Running LLM...".to_string(),
+                        },
+                        Some((*cache_key).clone()),
+                    );
+                }
+                self.start_network_call(*network_call_id);
+            }
+            ProviderWork::GenerateImage((row, col, input, cache_key, _, network_call_id)) => {
+                if let Some(sheet) = self.document.active_sheet_mut() {
+                    sheet.set_cell_value_with_cache(
+                        *row,
+                        *col,
+                        (*input).clone(),
+                        CellValue::FormulaPending {
+                            message: "Running image generation...".to_string(),
+                        },
+                        Some((*cache_key).clone()),
+                    );
+                }
+                self.start_network_call(*network_call_id);
+            }
+            ProviderWork::GenerateVideo((row, col, input, cache_key, _, network_call_id)) => {
+                if let Some(sheet) = self.document.active_sheet_mut() {
+                    sheet.set_cell_value_with_cache(
+                        *row,
+                        *col,
+                        (*input).clone(),
+                        CellValue::FormulaPending {
+                            message: "Running video generation...".to_string(),
+                        },
+                        Some((*cache_key).clone()),
+                    );
+                }
+                self.start_network_call(*network_call_id);
+            }
+            ProviderWork::ConcatenateVideo((row, col, input, cache_key, _)) => {
+                if let Some(sheet) = self.document.active_sheet_mut() {
+                    sheet.set_cell_value_with_cache(
+                        *row,
+                        *col,
+                        (*input).clone(),
+                        CellValue::FormulaPending {
+                            message: "Concatenating video clips...".to_string(),
+                        },
+                        Some((*cache_key).clone()),
+                    );
+                }
+                self.status = format!("Concatenating video clips for {}", cell_key(*row, *col));
+            }
+        }
+    }
+
+    fn start_network_call(&mut self, id: u64) {
+        if let Some(record) = self.network_calls.iter_mut().find(|record| record.id == id) {
+            record.status = NetworkCallStatus::Running;
         }
     }
 }
@@ -1002,6 +1452,96 @@ async fn run_generate_image_request(request: &GenerateImageRequest) -> anyhow::R
     })
 }
 
+async fn run_generate_video_request(request: &GenerateVideoRequest) -> anyhow::Result<MediaAsset> {
+    let client = FalVideoClient::from_settings_or_env()?;
+    let response = client.run(request).await?;
+    let mut metadata = serde_json::json!({
+        "model": request.model,
+        "endpoint": request.endpoint,
+        "request": request.input,
+        "response": response,
+    });
+
+    let data_uri =
+        match persist_media_data(&response.video.url, response.video.content_type.as_deref()).await
+        {
+            Ok(data_uri) => Some(data_uri),
+            Err(error) => {
+                metadata["persistence_warning"] =
+                    serde_json::Value::String(format!("Could not embed media data: {error}"));
+                None
+            }
+        };
+
+    Ok(MediaAsset {
+        provider: "fal.video".to_string(),
+        media_type: MediaType::Video,
+        uri: response.video.url.clone(),
+        data_uri,
+        metadata,
+    })
+}
+
+async fn run_concatenate_video_request(video_inputs: &[String]) -> anyhow::Result<MediaAsset> {
+    if !ffmpeg_is_available() {
+        anyhow::bail!("ffmpeg is not installed. Install ffmpeg to use CONCATENATEVIDEO.");
+    }
+
+    let workspace = concat_workspace_dir();
+    fs::create_dir_all(&workspace)?;
+    let cache_tag = stable_cache_key("CONCATENATEVIDEO", video_inputs);
+    let job_dir = workspace.join(cache_tag);
+    fs::create_dir_all(&job_dir)?;
+
+    let mut prepared_inputs = Vec::new();
+    for (index, input) in video_inputs.iter().enumerate() {
+        prepared_inputs.push(materialize_video_input(&job_dir, index, input).await?);
+    }
+
+    let concat_list_path = job_dir.join("inputs.txt");
+    let concat_list = prepared_inputs
+        .iter()
+        .map(|path| format!("file '{}'\n", escape_ffmpeg_concat_path(path)))
+        .collect::<String>();
+    fs::write(&concat_list_path, concat_list)?;
+
+    let output_path = job_dir.join("concatenated.mp4");
+    let output = Command::new("ffmpeg")
+        .arg("-y")
+        .arg("-f")
+        .arg("concat")
+        .arg("-safe")
+        .arg("0")
+        .arg("-i")
+        .arg(&concat_list_path)
+        .arg("-c")
+        .arg("copy")
+        .arg(&output_path)
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!("ffmpeg concat failed: {stderr}");
+    }
+
+    let output_uri = output_path.to_string_lossy().to_string();
+    let data_uri = persist_media_data(&output_uri, Some("video/mp4"))
+        .await
+        .ok();
+
+    Ok(MediaAsset {
+        provider: "local.ffmpeg".to_string(),
+        media_type: MediaType::Video,
+        uri: output_uri,
+        data_uri,
+        metadata: serde_json::json!({
+            "inputs": video_inputs,
+            "output_path": output_path,
+            "tool": "ffmpeg",
+        }),
+    })
+}
+
 async fn persist_media_data(uri: &str, content_type_hint: Option<&str>) -> anyhow::Result<String> {
     eprintln!(
         "[fal.image] persist_media_data start uri={} content_type_hint={:?}",
@@ -1011,6 +1551,15 @@ async fn persist_media_data(uri: &str, content_type_hint: Option<&str>) -> anyho
     if uri.starts_with("data:") {
         eprintln!("[fal.image] persist_media_data short-circuit data uri");
         return Ok(uri.to_string());
+    }
+
+    if Path::new(uri).exists() {
+        let bytes = fs::read(uri)?;
+        let content_type = content_type_hint.unwrap_or("application/octet-stream");
+        return Ok(format!(
+            "data:{content_type};base64,{}",
+            STANDARD.encode(bytes)
+        ));
     }
 
     let client = reqwest::Client::builder()
@@ -1039,6 +1588,84 @@ async fn persist_media_data(uri: &str, content_type_hint: Option<&str>) -> anyho
     ))
 }
 
+fn ffmpeg_is_available() -> bool {
+    Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn concat_workspace_dir() -> PathBuf {
+    std::env::temp_dir().join("cashew-video-concat")
+}
+
+async fn materialize_video_input(
+    job_dir: &Path,
+    index: usize,
+    input: &str,
+) -> anyhow::Result<PathBuf> {
+    if input.starts_with("data:") {
+        return write_data_uri_to_file(job_dir, index, input);
+    }
+
+    let path = Path::new(input);
+    if path.exists() {
+        return Ok(path.to_path_buf());
+    }
+
+    let extension = media_extension_from_uri(input).unwrap_or("mp4");
+    let destination = job_dir.join(format!("input-{index}.{extension}"));
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()?;
+    let bytes = client
+        .get(input)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+    fs::write(&destination, &bytes)?;
+    Ok(destination)
+}
+
+fn write_data_uri_to_file(job_dir: &Path, index: usize, data_uri: &str) -> anyhow::Result<PathBuf> {
+    let (header, payload) = data_uri
+        .split_once(',')
+        .ok_or_else(|| anyhow::anyhow!("Invalid data URI video input"))?;
+    let extension = if header.contains("video/webm") {
+        "webm"
+    } else if header.contains("video/quicktime") {
+        "mov"
+    } else {
+        "mp4"
+    };
+    let data = STANDARD.decode(payload)?;
+    let destination = job_dir.join(format!("input-{index}.{extension}"));
+    fs::write(&destination, data)?;
+    Ok(destination)
+}
+
+fn media_extension_from_uri(uri: &str) -> Option<&'static str> {
+    let trimmed = uri.split('?').next().unwrap_or(uri);
+    if trimmed.ends_with(".webm") {
+        Some("webm")
+    } else if trimmed.ends_with(".mov") {
+        Some("mov")
+    } else if trimmed.ends_with(".mkv") {
+        Some("mkv")
+    } else if trimmed.ends_with(".mp4") {
+        Some("mp4")
+    } else {
+        None
+    }
+}
+
+fn escape_ffmpeg_concat_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\'', "'\\''")
+}
+
 fn llm_cache_key(input: &str, request: &OpenRouterRequest) -> String {
     let request_json = serde_json::to_string(request).unwrap_or_else(|_| request.prompt.clone());
     stable_cache_key(input, &[request_json])
@@ -1047,6 +1674,15 @@ fn llm_cache_key(input: &str, request: &OpenRouterRequest) -> String {
 fn generate_image_cache_key(input: &str, request: &GenerateImageRequest) -> String {
     let request_json = serde_json::to_string(request).unwrap_or_else(|_| request.prompt.clone());
     stable_cache_key(input, &[request_json])
+}
+
+fn generate_video_cache_key(input: &str, request: &GenerateVideoRequest) -> String {
+    let request_json = serde_json::to_string(request).unwrap_or_else(|_| request.prompt.clone());
+    stable_cache_key(input, &[request_json])
+}
+
+fn concatenate_video_cache_key(input: &str, video_inputs: &[String]) -> String {
+    stable_cache_key(input, video_inputs)
 }
 
 fn cached_text(document: &CashewDocument, cache_key: &str) -> Option<String> {
@@ -1086,6 +1722,24 @@ fn llm_cell_is_runnable(value: &CellValue) -> bool {
 fn generate_image_cell_is_runnable(value: &CellValue) -> bool {
     match value {
         CellValue::FormulaPending { message } => message == "fal.image request is ready to run",
+        CellValue::Error(_) => true,
+        CellValue::Empty | CellValue::Text(_) | CellValue::Cached(_) => false,
+    }
+}
+
+fn generate_video_cell_is_runnable(value: &CellValue) -> bool {
+    match value {
+        CellValue::FormulaPending { message } => message == "fal.video request is ready to run",
+        CellValue::Error(_) => true,
+        CellValue::Empty | CellValue::Text(_) | CellValue::Cached(_) => false,
+    }
+}
+
+fn concatenate_video_cell_is_runnable(value: &CellValue) -> bool {
+    match value {
+        CellValue::FormulaPending { message } => {
+            message == "Local video concatenation is ready to run"
+        }
         CellValue::Error(_) => true,
         CellValue::Empty | CellValue::Text(_) | CellValue::Cached(_) => false,
     }
@@ -1161,6 +1815,40 @@ mod tests {
     }
 
     #[test]
+    fn queued_provider_calls_can_be_dispatched_later() {
+        let mut state = AppState::new();
+        state.set_selected_formula(r#"=GENERATEIMAGE("A cat", "flux/dev")"#.to_string());
+
+        let work = state
+            .prepare_generate_image_for_cell(0, 0, true)
+            .expect("image formula should prepare");
+        state.queue_pending_provider_call(ProviderWork::GenerateImage(work));
+
+        assert_eq!(state.pending_provider_calls.len(), 1);
+        assert!(matches!(
+            state.network_calls.first().map(|record| record.status),
+            Some(NetworkCallStatus::PendingApproval)
+        ));
+
+        let works = state.dispatch_pending_provider_calls();
+
+        assert_eq!(works.len(), 1);
+        assert!(state.pending_provider_calls.is_empty());
+        assert!(matches!(
+            state.network_calls.first().map(|record| record.status),
+            Some(NetworkCallStatus::Running)
+        ));
+        assert!(matches!(
+            state
+                .document
+                .active_sheet()
+                .and_then(|sheet| sheet.cell(0, 0))
+                .map(|cell| &cell.value),
+            Some(CellValue::FormulaPending { message }) if message == "Running image generation..."
+        ));
+    }
+
+    #[test]
     fn generate_image_network_record_extracts_and_sanitizes_images() {
         let request = GenerateImageRequest::new(
             "edit it",
@@ -1173,7 +1861,8 @@ mod tests {
         )
         .unwrap();
 
-        let record = NetworkCallRecord::for_generate_image(7, 1, 2, &request);
+        let record =
+            NetworkCallRecord::for_generate_image(7, 1, 2, NetworkCallStatus::Running, &request);
 
         assert_eq!(record.cell, "C2");
         assert_eq!(record.url, "https://queue.fal.run/openai/gpt-image-2/edit");
@@ -1188,7 +1877,7 @@ mod tests {
     fn openrouter_network_record_does_not_include_auth_data() {
         let request = OpenRouterRequest::new("hello");
 
-        let record = NetworkCallRecord::for_llm(3, 0, 0, &request);
+        let record = NetworkCallRecord::for_llm(3, 0, 0, NetworkCallStatus::Running, &request);
         let body = serde_json::to_string(&record.request_body).unwrap();
 
         assert_eq!(record.url, crate::backend::providers::openrouter::ENDPOINT);

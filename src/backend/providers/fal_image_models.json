@@ -1,0 +1,30 @@
+[
+  {
+    "id": "flux/dev",
+    "label": "FLUX Dev",
+    "description": "Fast fal image generation. Supports text-to-image and one image input.",
+    "default": true,
+    "queue_api_base": "https://queue.fal.run",
+    "endpoint_text": "fal-ai/flux/dev",
+    "endpoint_edit": "fal-ai/flux/dev/image-to-image",
+    "request_contract": "flux_dev",
+    "max_input_images": 1,
+    "default_output_format": "jpeg",
+    "supports_quality": false,
+    "default_quality": null
+  },
+  {
+    "id": "openai/gpt-image-2",
+    "label": "GPT Image 2",
+    "description": "Higher quality image generation/editing. Supports multiple image inputs.",
+    "default": false,
+    "queue_api_base": "https://queue.fal.run",
+    "endpoint_text": "openai/gpt-image-2",
+    "endpoint_edit": "openai/gpt-image-2/edit",
+    "request_contract": "openai_gpt_image_2",
+    "max_input_images": 16,
+    "default_output_format": "png",
+    "supports_quality": true,
+    "default_quality": "medium"
+  }
+]

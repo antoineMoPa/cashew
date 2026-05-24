@@ -5,6 +5,7 @@ use super::{
         fal_image::{
             DEFAULT_MODEL as DEFAULT_IMAGE_MODEL, GenerateImageRequest, parse_image_quality,
         },
+        fal_video::{GenerateVideoRequest, video_model_id_is_supported},
         openrouter::{DEFAULT_MODEL, OpenRouterRequest},
     },
 };
@@ -12,7 +13,13 @@ use super::{
 #[derive(Debug, Clone, PartialEq)]
 pub enum FormulaValue {
     Number(f64),
+    Text(String),
+    Cached {
+        value: String,
+        cache_key: Option<String>,
+    },
     Pending(String),
+    Empty,
 }
 
 #[cfg(test)]
@@ -42,17 +49,21 @@ fn evaluate_formula_with_sheet(input: &str, sheet: Option<&Sheet>) -> Result<For
             .ok_or_else(|| format!("Unknown function {name}"))?;
 
         return match function.implementation {
-            FormulaImplementation::NoopAi { placeholder } => {
-                Ok(FormulaValue::Pending(placeholder.to_string()))
-            }
             FormulaImplementation::ProviderAi { provider } => Ok(FormulaValue::Pending(format!(
                 "{provider} request is ready to run"
             ))),
+            FormulaImplementation::LocalVideoConcat => Ok(FormulaValue::Pending(
+                "Local video concatenation is ready to run".to_string(),
+            )),
             FormulaImplementation::Math(math) => {
                 let values = parse_numeric_arguments(args, sheet)?;
                 evaluate_math_function(math, &values)
             }
         };
+    }
+
+    if let Some(value) = resolve_single_cell_reference(expression, sheet)? {
+        return Ok(value);
     }
 
     ExpressionParser::new(expression, sheet)
@@ -165,6 +176,111 @@ pub fn generate_image_request_for_sheet(
         .map_err(|error| error.to_string())
 }
 
+pub fn generate_video_request_for_sheet(
+    input: &str,
+    sheet: &Sheet,
+) -> Result<Option<GenerateVideoRequest>, String> {
+    let expression = input
+        .trim_start()
+        .strip_prefix('=')
+        .ok_or_else(|| "Formula must start with =".to_string())?
+        .trim();
+    let Some((name, args)) = parse_function_call(expression)? else {
+        return Ok(None);
+    };
+
+    if !name.eq_ignore_ascii_case("GENERATEVIDEO") {
+        return Ok(None);
+    }
+
+    let args = split_formula_arguments(args)?;
+    if args.len() < 2 || args.len() > 5 {
+        return Err(
+            "GENERATEVIDEO expects prompt, image, optional model, optional duration, optional aspect_ratio"
+                .to_string(),
+        );
+    }
+
+    let prompt = resolve_text_argument(&args[0], sheet)?;
+    let image_url = resolve_text_argument(&args[1], sheet)?;
+
+    let mut model = None;
+    let mut duration = None;
+    let mut aspect_ratio = None;
+
+    for arg in args.iter().skip(2) {
+        let value = resolve_text_argument(arg, sheet)?;
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+
+        if model.is_none() && (video_model_id_is_supported(value) || value.starts_with("fal-ai/")) {
+            model = Some(value.to_string());
+            continue;
+        }
+
+        if duration.is_none() {
+            if let Ok(parsed) = value.parse::<u32>() {
+                duration = Some(parsed);
+                continue;
+            }
+        }
+
+        if aspect_ratio.is_none() {
+            aspect_ratio = Some(value.to_string());
+            continue;
+        }
+
+        return Err(
+            "GENERATEVIDEO arguments after image must be model, duration, and aspect_ratio"
+                .to_string(),
+        );
+    }
+
+    GenerateVideoRequest::new(prompt, image_url, model, duration, aspect_ratio)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+pub fn concatenate_video_inputs_for_sheet(
+    input: &str,
+    sheet: &Sheet,
+) -> Result<Option<Vec<String>>, String> {
+    let expression = input
+        .trim_start()
+        .strip_prefix('=')
+        .ok_or_else(|| "Formula must start with =".to_string())?
+        .trim();
+    let Some((name, args)) = parse_function_call(expression)? else {
+        return Ok(None);
+    };
+
+    if !name.eq_ignore_ascii_case("CONCATENATEVIDEO") {
+        return Ok(None);
+    }
+
+    let args = split_formula_arguments(args)?;
+    if args.len() < 2 {
+        return Err("CONCATENATEVIDEO expects at least two video inputs".to_string());
+    }
+
+    let videos = args
+        .iter()
+        .map(|arg| resolve_text_argument(arg, sheet))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+
+    if videos.len() < 2 {
+        return Err("CONCATENATEVIDEO expects at least two non-empty video inputs".to_string());
+    }
+
+    Ok(Some(videos))
+}
+
 fn parse_function_call(expression: &str) -> Result<Option<(String, &str)>, String> {
     let Some(open) = expression.find('(') else {
         return Ok(None);
@@ -201,6 +317,36 @@ fn parse_numeric_arguments(args: &str, sheet: Option<&Sheet>) -> Result<Vec<f64>
     args.split(',')
         .map(|arg| ExpressionParser::new(arg.trim(), sheet).parse())
         .collect()
+}
+
+fn resolve_single_cell_reference(
+    expression: &str,
+    sheet: Option<&Sheet>,
+) -> Result<Option<FormulaValue>, String> {
+    let Some(sheet) = sheet else {
+        return Ok(None);
+    };
+
+    let Ok((row, col)) = parse_cell_reference(expression) else {
+        return Ok(None);
+    };
+
+    let Some(cell) = sheet.cell(row, col) else {
+        return Ok(Some(FormulaValue::Empty));
+    };
+
+    let value = match &cell.value {
+        CellValue::Empty => FormulaValue::Empty,
+        CellValue::Text(value) => FormulaValue::Text(value.clone()),
+        CellValue::FormulaPending { message } => FormulaValue::Pending(message.clone()),
+        CellValue::Cached(value) => FormulaValue::Cached {
+            value: value.clone(),
+            cache_key: cell.cache_key.clone(),
+        },
+        CellValue::Error(error) => return Err(format!("{expression} has an error: {error}")),
+    };
+
+    Ok(Some(value))
 }
 
 fn split_formula_arguments(args: &str) -> Result<Vec<String>, String> {
@@ -516,7 +662,11 @@ pub fn parse_cell_reference(reference: &str) -> Result<(usize, usize), String> {
     while let Some(character) = chars.peek().copied() {
         if character.is_ascii_alphabetic() {
             saw_column = true;
-            col = col * 26 + (character.to_ascii_uppercase() as u8 - b'A' + 1) as usize;
+            let letter_value = (character.to_ascii_uppercase() as u8 - b'A' + 1) as usize;
+            col = col
+                .checked_mul(26)
+                .and_then(|value| value.checked_add(letter_value))
+                .ok_or_else(|| "Cell reference column is too large".to_string())?;
             chars.next();
         } else {
             break;
@@ -595,6 +745,49 @@ mod tests {
                 "fal.openrouter request is ready to run".to_string()
             ))
         );
+        assert_eq!(
+            evaluate_formula("=GENERATEVIDEO(A1, A2)"),
+            Ok(FormulaValue::Pending(
+                "fal.video request is ready to run".to_string()
+            ))
+        );
+        assert_eq!(
+            evaluate_formula("=CONCATENATEVIDEO(A1, A2)"),
+            Ok(FormulaValue::Pending(
+                "Local video concatenation is ready to run".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn direct_cell_references_preserve_text_values() {
+        let mut sheet = Sheet::new("Text", 1, 1);
+        sheet.set_cell_input(0, 0, "hello".to_string());
+
+        assert_eq!(
+            evaluate_formula_for_sheet("=A1", &sheet),
+            Ok(FormulaValue::Text("hello".to_string()))
+        );
+    }
+
+    #[test]
+    fn direct_cell_references_preserve_cached_values() {
+        let mut sheet = Sheet::new("Media", 1, 1);
+        sheet.set_cell_value_with_cache(
+            0,
+            0,
+            "https://example.com/image.png".to_string(),
+            CellValue::Cached("https://example.com/image.png".to_string()),
+            Some("cache-key".to_string()),
+        );
+
+        assert_eq!(
+            evaluate_formula_for_sheet("=$A1", &sheet),
+            Ok(FormulaValue::Cached {
+                value: "https://example.com/image.png".to_string(),
+                cache_key: Some("cache-key".to_string()),
+            })
+        );
     }
 
     #[test]
@@ -671,9 +864,55 @@ mod tests {
     }
 
     #[test]
+    fn builds_generate_video_request_from_literals_and_cell_refs() {
+        let mut sheet = Sheet::new("Video", 2, 2);
+        sheet.set_cell_input(0, 0, "A toy robot waves".to_string());
+        sheet.set_cell_input(0, 1, "https://example.com/robot.png".to_string());
+
+        let request = generate_video_request_for_sheet(
+            r#"=GENERATEVIDEO($A1, $B1, "fal-ai/veo2/image-to-video", 6, "9:16")"#,
+            &sheet,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(request.prompt, "A toy robot waves");
+        assert_eq!(request.image_url, "https://example.com/robot.png");
+        assert_eq!(request.model, "fal-ai/veo2/image-to-video");
+        assert_eq!(request.duration, 6);
+        assert_eq!(request.aspect_ratio.as_deref(), Some("9:16"));
+    }
+
+    #[test]
+    fn resolves_concatenate_video_inputs() {
+        let mut sheet = Sheet::new("Video", 2, 2);
+        sheet.set_cell_input(0, 0, "https://example.com/a.mp4".to_string());
+        sheet.set_cell_input(0, 1, "https://example.com/b.mp4".to_string());
+
+        let inputs = concatenate_video_inputs_for_sheet(r#"=CONCATENATEVIDEO($A1, $B1)"#, &sheet)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            inputs,
+            vec![
+                "https://example.com/a.mp4".to_string(),
+                "https://example.com/b.mp4".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn parses_absolute_cell_references() {
         assert_eq!(parse_cell_reference("$A1"), Ok((0, 0)));
         assert_eq!(parse_cell_reference("B$12"), Ok((11, 1)));
         assert_eq!(parse_cell_reference("$AA10"), Ok((9, 26)));
+    }
+
+    #[test]
+    fn rejects_overflowing_cell_references() {
+        let reference = format!("{}1", "Z".repeat(32));
+        let error = parse_cell_reference(&reference).unwrap_err();
+        assert_eq!(error, "Cell reference column is too large");
     }
 }

@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
-use std::time::Duration;
+use std::{sync::OnceLock, time::Duration};
 
-use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::backend::settings::UserSettings;
@@ -11,22 +11,8 @@ use crate::backend::settings::UserSettings;
 pub const PROVIDER_NAME: &str = "fal.image";
 pub const DEFAULT_MODEL: &str = "flux/dev";
 pub const OPENAI_GPT_IMAGE_2_MODEL: &str = "openai/gpt-image-2";
-pub const DEFAULT_OPENAI_IMAGE_QUALITY: ImageQuality = ImageQuality::Medium;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FalImageModel {
-    FluxDev,
-    OpenAiGptImage2,
-}
-
-impl FalImageModel {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::FluxDev => "flux/dev",
-            Self::OpenAiGptImage2 => OPENAI_GPT_IMAGE_2_MODEL,
-        }
-    }
-}
+const MODEL_CATALOG_JSON: &str = include_str!("fal_image_models.json");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageQuality {
@@ -42,15 +28,6 @@ impl ImageQuality {
             Self::Medium => "medium",
             Self::High => "high",
         }
-    }
-}
-
-pub fn parse_image_quality(value: &str) -> Option<ImageQuality> {
-    match value.trim() {
-        "low" => Some(ImageQuality::Low),
-        "medium" => Some(ImageQuality::Medium),
-        "high" => Some(ImageQuality::High),
-        _ => None,
     }
 }
 
@@ -87,11 +64,36 @@ struct QueueLogEntry {
     message: String,
 }
 
-fn deserialize_queue_logs<'de, D>(deserializer: D) -> Result<Vec<QueueLogEntry>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Option::<Vec<QueueLogEntry>>::deserialize(deserializer).map(|logs| logs.unwrap_or_default())
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ImageRequestContract {
+    FluxDev,
+    #[serde(rename = "openai_gpt_image_2")]
+    OpenaiGptImage2,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ImageModelSpec {
+    id: String,
+    label: String,
+    description: String,
+    default: bool,
+    queue_api_base: String,
+    endpoint_text: String,
+    endpoint_edit: String,
+    request_contract: ImageRequestContract,
+    max_input_images: usize,
+    default_output_format: String,
+    supports_quality: bool,
+    default_quality: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImageModelDoc {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub default: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -101,6 +103,7 @@ pub struct GenerateImageRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quality: Option<String>,
     pub endpoint: String,
+    pub queue_api_base: String,
     pub input: Value,
 }
 
@@ -128,6 +131,61 @@ pub struct FalImage {
     pub file_size: Option<u64>,
 }
 
+fn deserialize_queue_logs<'de, D>(deserializer: D) -> Result<Vec<QueueLogEntry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<Vec<QueueLogEntry>>::deserialize(deserializer).map(|logs| logs.unwrap_or_default())
+}
+
+pub fn parse_image_quality(value: &str) -> Option<ImageQuality> {
+    match value.trim() {
+        "low" => Some(ImageQuality::Low),
+        "medium" => Some(ImageQuality::Medium),
+        "high" => Some(ImageQuality::High),
+        _ => None,
+    }
+}
+
+fn image_model_catalog() -> &'static [ImageModelSpec] {
+    static CATALOG: OnceLock<Vec<ImageModelSpec>> = OnceLock::new();
+    CATALOG
+        .get_or_init(|| {
+            serde_json::from_str(MODEL_CATALOG_JSON)
+                .expect("fal_image_models.json should be valid image model metadata")
+        })
+        .as_slice()
+}
+
+fn default_image_model_spec() -> &'static ImageModelSpec {
+    image_model_catalog()
+        .iter()
+        .find(|model| model.default)
+        .unwrap_or_else(|| &image_model_catalog()[0])
+}
+
+fn image_model_spec(model: &str) -> Option<&'static ImageModelSpec> {
+    image_model_catalog()
+        .iter()
+        .find(|candidate| candidate.id == model)
+}
+
+pub fn image_model_docs() -> Vec<ImageModelDoc> {
+    image_model_catalog()
+        .iter()
+        .map(|model| ImageModelDoc {
+            id: model.id.clone(),
+            label: model.label.clone(),
+            description: model.description.clone(),
+            default: model.default,
+        })
+        .collect()
+}
+
+pub fn image_model_id_is_supported(model: &str) -> bool {
+    image_model_spec(model.trim()).is_some()
+}
+
 impl FalImageClient {
     pub fn from_settings_or_env() -> anyhow::Result<Self> {
         let settings = UserSettings::load_default()?;
@@ -148,16 +206,11 @@ impl FalImageClient {
     }
 
     pub async fn run(&self, request: &GenerateImageRequest) -> anyhow::Result<FalImageResponse> {
-        eprintln!(
-            "[fal.image] sending request endpoint={} model={} prompt_len={} input={}",
-            request.endpoint,
-            request.model,
-            request.prompt.len(),
-            serde_json::to_string(&request.input)
-                .unwrap_or_else(|_| "<unserializable>".to_string())
+        let submit_url = format!(
+            "{}/{}",
+            request.queue_api_base.trim_end_matches('/'),
+            request.endpoint
         );
-
-        let submit_url = format!("https://queue.fal.run/{}", request.endpoint);
         let submitted = self
             .http
             .post(&submit_url)
@@ -168,11 +221,6 @@ impl FalImageClient {
         let submitted: QueueSubmitResponse =
             decode_json_response(submitted, "submit fal image queue request").await?;
 
-        eprintln!(
-            "[fal.image] queued request request_id={} status_url={} response_url={}",
-            submitted.request_id, submitted.status_url, submitted.response_url
-        );
-
         let response: FalImageResponse = loop {
             let status = self
                 .http
@@ -182,16 +230,6 @@ impl FalImageClient {
                 .await?;
             let status: QueueStatusResponse =
                 decode_json_response(status, "read fal image queue status").await?;
-
-            eprintln!(
-                "[fal.image] queue status request_id={} status={} queue_position={:?} logs={} error={:?} error_type={:?}",
-                submitted.request_id,
-                status.status,
-                status.queue_position,
-                status.logs.len(),
-                status.error,
-                status.error_type
-            );
 
             match status.status.as_str() {
                 "COMPLETED" => {
@@ -208,24 +246,23 @@ impl FalImageClient {
                     break decode_json_response(response, "fetch fal image queue response").await?;
                 }
                 "IN_QUEUE" | "IN_PROGRESS" => {
+                    let _ = status.queue_position;
+                    let _ = status
+                        .logs
+                        .iter()
+                        .map(|log| log.message.len())
+                        .sum::<usize>();
                     std::thread::sleep(Duration::from_secs(1));
                 }
                 other => {
                     let message = status
                         .error
+                        .or(status.error_type)
                         .unwrap_or_else(|| format!("fal queue returned unexpected status {other}"));
                     anyhow::bail!(message);
                 }
             }
         };
-
-        eprintln!(
-            "[fal.image] received response endpoint={} images={} prompt={:?} seed={:?}",
-            request.endpoint,
-            response.images.len(),
-            response.prompt,
-            response.seed
-        );
 
         if response.images.is_empty() {
             anyhow::bail!("fal image response did not include any images");
@@ -242,7 +279,10 @@ async fn decode_json_response<T: DeserializeOwned>(
     let status = response.status();
     let body = response.text().await?;
     if !status.is_success() {
-        anyhow::bail!("{context} failed with HTTP {status}: {}", body_excerpt(&body));
+        anyhow::bail!(
+            "{context} failed with HTTP {status}: {}",
+            body_excerpt(&body)
+        );
     }
 
     serde_json::from_str(&body).map_err(|error| {
@@ -271,79 +311,116 @@ impl GenerateImageRequest {
         image_urls: Vec<String>,
     ) -> anyhow::Result<Self> {
         let prompt = prompt.into();
-        let model = parse_model(&model.into())?;
-        let endpoint = endpoint_for_model(&model, !image_urls.is_empty())?;
-        let quality = match (model, quality) {
-            (FalImageModel::OpenAiGptImage2, None) => Some(DEFAULT_OPENAI_IMAGE_QUALITY),
-            (_, quality) => quality,
-        };
-        let input = input_for_request(&model, &prompt, quality, image_urls)?;
+        let model = model.into();
+        let spec = select_image_model_spec(&model)?;
+        let endpoint = select_image_endpoint(spec, image_urls.is_empty());
+        let quality = select_image_quality(spec, quality)?;
+        let input = build_image_request_input(spec, &prompt, quality, image_urls)?;
 
         Ok(Self {
             prompt,
-            model: model.as_str().to_string(),
-            quality: quality.map(|quality| quality.as_str().to_string()),
+            model: spec.id.clone(),
+            quality: quality.map(|value| value.as_str().to_string()),
             endpoint,
+            queue_api_base: spec.queue_api_base.clone(),
             input,
         })
     }
 }
 
-fn parse_model(model: &str) -> anyhow::Result<FalImageModel> {
-    match model.trim() {
-        "" | DEFAULT_MODEL => Ok(FalImageModel::FluxDev),
-        OPENAI_GPT_IMAGE_2_MODEL => Ok(FalImageModel::OpenAiGptImage2),
-        other => anyhow::bail!(
-            "Unsupported GENERATEIMAGE model {other}. Use flux/dev or openai/gpt-image-2"
-        ),
+fn select_image_model_spec(model: &str) -> anyhow::Result<&'static ImageModelSpec> {
+    let model = if model.trim().is_empty() {
+        DEFAULT_MODEL
+    } else {
+        model.trim()
+    };
+
+    image_model_spec(model).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Unsupported GENERATEIMAGE model {model}. Use one of: {}",
+            image_model_catalog()
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })
+}
+
+fn select_image_endpoint(model: &ImageModelSpec, is_text_only: bool) -> String {
+    if is_text_only {
+        model.endpoint_text.clone()
+    } else {
+        model.endpoint_edit.clone()
     }
 }
 
-fn endpoint_for_model(model: &FalImageModel, has_images: bool) -> anyhow::Result<String> {
-    match (model, has_images) {
-        (FalImageModel::FluxDev, false) => Ok("fal-ai/flux/dev".to_string()),
-        (FalImageModel::FluxDev, true) => Ok("fal-ai/flux/dev/image-to-image".to_string()),
-        (FalImageModel::OpenAiGptImage2, false) => Ok("openai/gpt-image-2".to_string()),
-        (FalImageModel::OpenAiGptImage2, true) => Ok("openai/gpt-image-2/edit".to_string()),
+fn select_image_quality(
+    model: &ImageModelSpec,
+    quality: Option<ImageQuality>,
+) -> anyhow::Result<Option<ImageQuality>> {
+    if !model.supports_quality {
+        return Ok(None);
     }
+
+    if let Some(quality) = quality {
+        return Ok(Some(quality));
+    }
+
+    let Some(default_quality) = model.default_quality.as_deref() else {
+        return Ok(None);
+    };
+
+    parse_image_quality(default_quality)
+        .map(Some)
+        .ok_or_else(|| anyhow::anyhow!("Invalid default image quality in model catalog"))
 }
 
-fn input_for_request(
-    model: &FalImageModel,
+fn build_image_request_input(
+    model: &ImageModelSpec,
     prompt: &str,
     quality: Option<ImageQuality>,
     image_urls: Vec<String>,
 ) -> anyhow::Result<Value> {
-    match (model, image_urls.as_slice()) {
-        (FalImageModel::FluxDev, []) => Ok(json!({
+    if image_urls.len() > model.max_input_images {
+        anyhow::bail!(
+            "{} supports up to {} input image{}",
+            model.id,
+            model.max_input_images,
+            if model.max_input_images == 1 { "" } else { "s" }
+        );
+    }
+
+    match (&model.request_contract, image_urls.as_slice()) {
+        (ImageRequestContract::FluxDev, []) => Ok(json!({
             "prompt": prompt,
             "num_images": 1,
-            "output_format": "jpeg",
+            "output_format": model.default_output_format,
             "acceleration": "regular"
         })),
-        (FalImageModel::FluxDev, [image_url]) => Ok(json!({
+        (ImageRequestContract::FluxDev, [image_url]) => Ok(json!({
             "prompt": prompt,
             "image_url": image_url,
             "strength": 0.95,
             "num_images": 1,
-            "output_format": "jpeg",
+            "output_format": model.default_output_format,
             "acceleration": "regular"
         })),
-        (FalImageModel::FluxDev, _) => {
-            anyhow::bail!("flux/dev image editing supports one input image")
+        (ImageRequestContract::FluxDev, _) => {
+            anyhow::bail!("{} supports exactly one input image in edit mode", model.id)
         }
-        (FalImageModel::OpenAiGptImage2, []) => Ok(json!({
+        (ImageRequestContract::OpenaiGptImage2, []) => Ok(json!({
             "prompt": prompt,
             "num_images": 1,
-            "quality": quality.unwrap_or(DEFAULT_OPENAI_IMAGE_QUALITY).as_str(),
-            "output_format": "png"
+            "quality": quality.map(ImageQuality::as_str),
+            "output_format": model.default_output_format
         })),
-        (FalImageModel::OpenAiGptImage2, _) => Ok(json!({
+        (ImageRequestContract::OpenaiGptImage2, _) => Ok(json!({
             "prompt": prompt,
             "image_urls": image_urls,
             "num_images": 1,
-            "quality": quality.unwrap_or(DEFAULT_OPENAI_IMAGE_QUALITY).as_str(),
-            "output_format": "png"
+            "quality": quality.map(ImageQuality::as_str),
+            "output_format": model.default_output_format
         })),
     }
 }
@@ -357,6 +434,7 @@ mod tests {
         let request = GenerateImageRequest::new("make it", "flux/dev", None, Vec::new()).unwrap();
 
         assert_eq!(request.endpoint, "fal-ai/flux/dev");
+        assert_eq!(request.queue_api_base, "https://queue.fal.run");
         assert_eq!(request.input["prompt"], "make it");
         assert!(request.input.get("image_url").is_none());
     }

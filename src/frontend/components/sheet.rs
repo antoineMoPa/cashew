@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 
 use crate::backend::cache::{CacheStatus, CachedValue, MediaType};
 use crate::backend::document::{Cell, CellValue, column_name};
-use crate::backend::formulas::matching_functions;
+use crate::backend::formulas::{function_for_formula_input, matching_functions};
 
 use super::super::state::{
     AppState, CellInteractionMode, MIN_VISIBLE_COLS, MIN_VISIBLE_ROWS, ResizeDrag, ResizeKind,
@@ -26,9 +26,23 @@ type GenerateImageWork = (
     u64,
 );
 
+type GenerateVideoWork = (
+    usize,
+    usize,
+    String,
+    String,
+    crate::backend::providers::fal_video::GenerateVideoRequest,
+    u64,
+);
+
+type ConcatenateVideoWork = (usize, usize, String, String, Vec<String>);
+
+#[derive(Debug, Clone)]
 pub(crate) enum ProviderWork {
     Llm(LlmWork),
     GenerateImage(GenerateImageWork),
+    GenerateVideo(GenerateVideoWork),
+    ConcatenateVideo(ConcatenateVideoWork),
 }
 
 #[component]
@@ -124,10 +138,10 @@ pub(crate) fn SheetView(mut state: Signal<AppState>) -> Element {
             (0..cols)
                 .map(|col| {
                     let cell = sheet.cell(row, col).cloned();
-                    let image_uri = cell
+                    let media_preview = cell
                         .as_ref()
-                        .and_then(|cell| cached_image_uri(&snapshot.document, cell));
-                    (cell, image_uri)
+                        .and_then(|cell| cached_media_preview(&snapshot.document, cell));
+                    (cell, media_preview)
                 })
                 .collect::<Vec<_>>()
         })
@@ -155,7 +169,7 @@ pub(crate) fn SheetView(mut state: Signal<AppState>) -> Element {
                         CellEditor {
                             state,
                             cell: visible_cells[row][col].0.clone(),
-                            image_uri: visible_cells[row][col].1.clone(),
+                            media_preview: visible_cells[row][col].1.clone(),
                             row,
                             col,
                             width: column_widths[col],
@@ -226,7 +240,7 @@ fn RowHeader(mut state: Signal<AppState>, row: usize, height: u16) -> Element {
 fn CellEditor(
     mut state: Signal<AppState>,
     cell: Option<Cell>,
-    image_uri: Option<String>,
+    media_preview: Option<(String, MediaType)>,
     row: usize,
     col: usize,
     width: u16,
@@ -250,7 +264,7 @@ fn CellEditor(
     let selection_class = if in_selection { " in-selection" } else { "" };
     let class = format!("cell{}{}{}", status_class, selected_class, selection_class);
     let style = format!("width: {}px; height: {}px;", width, height);
-    let image_uri = image_uri.filter(|_| mode != CellInteractionMode::FormulaEdit);
+    let media_preview = media_preview.filter(|_| mode != CellInteractionMode::FormulaEdit);
     let editor_id = format!("cell-{row}-{col}");
 
     if mode == CellInteractionMode::FormulaEdit {
@@ -270,7 +284,7 @@ fn CellEditor(
         });
     }
 
-    if let Some(image_uri) = image_uri {
+    if let Some((media_uri, media_type)) = media_preview {
         return rsx! {
             div {
                 id: "cell-{row}-{col}",
@@ -297,10 +311,23 @@ fn CellEditor(
                 onkeydown: move |event| {
                     handle_cell_keydown(state, event, row, col);
                 },
-                img {
-                    class: "cell-image-preview",
-                    src: "{image_uri}",
-                    alt: ""
+                onpaste: move |event| {
+                    event.prevent_default();
+                    paste_into_selection(state, row, col);
+                },
+                if media_type == MediaType::Image {
+                    img {
+                        class: "cell-image-preview",
+                        src: "{media_uri}",
+                        alt: ""
+                    }
+                } else if media_type == MediaType::Video {
+                    video {
+                        class: "cell-image-preview",
+                        src: "{media_uri}",
+                        controls: true,
+                        preload: "metadata"
+                    }
                 }
                 if selected {
                     if let Some(error) = error_message.clone() {
@@ -337,6 +364,10 @@ fn CellEditor(
                 },
                 onkeydown: move |event| {
                     handle_cell_keydown(state, event, row, col);
+                },
+                onpaste: move |event| {
+                    event.prevent_default();
+                    paste_into_selection(state, row, col);
                 },
                 "{value}"
                 if selected {
@@ -383,8 +414,8 @@ fn CellEditor(
                 });
             },
             onblur: move |_| {
-                let work = state.with_mut(|state| prepare_provider_work(state, row, col));
-                spawn_provider_work(state, work);
+                state.with_mut(|state| state.commit_formula_buffer());
+                queue_or_spawn_provider_work(state, row, col);
             },
             onkeydown: move |event| {
                 handle_cell_keydown(state, event, row, col);
@@ -416,10 +447,10 @@ fn ErrorPopover(message: String) -> Element {
     }
 }
 
-fn cached_image_uri(
+fn cached_media_preview(
     document: &crate::backend::document::CashewDocument,
     cell: &Cell,
-) -> Option<String> {
+) -> Option<(String, MediaType)> {
     let cache_key = cell.cache_key.as_ref()?;
     let entry = document.cache.get(cache_key)?;
     if entry.status != CacheStatus::Ready {
@@ -427,9 +458,14 @@ fn cached_image_uri(
     }
 
     match &entry.value {
-        CachedValue::MediaAsset(asset) if asset.media_type == MediaType::Image => {
-            Some(asset.data_uri.clone().unwrap_or_else(|| asset.uri.clone()))
-        }
+        CachedValue::MediaAsset(asset) if asset.media_type == MediaType::Image => Some((
+            asset.data_uri.clone().unwrap_or_else(|| asset.uri.clone()),
+            MediaType::Image,
+        )),
+        CachedValue::MediaAsset(asset) if asset.media_type == MediaType::Video => Some((
+            asset.data_uri.clone().unwrap_or_else(|| asset.uri.clone()),
+            MediaType::Video,
+        )),
         CachedValue::Text(_) | CachedValue::Json(_) | CachedValue::MediaAsset(_) => None,
     }
 }
@@ -544,13 +580,8 @@ fn handle_cell_keydown(mut state: Signal<AppState>, event: KeyboardEvent, row: u
         }
         Key::Enter => {
             event.prevent_default();
-            let work = state.with_mut(|state| {
-                state.finish_cell_edit(row, col);
-                prepare_provider_work(state, row, col)
-            });
-            if work.is_some() {
-                spawn_provider_work(state, work);
-            }
+            state.with_mut(|state| state.finish_cell_edit(row, col));
+            queue_or_spawn_provider_work(state, row, col);
             state.with_mut(|state| {
                 state.move_selection(1, 0);
             });
@@ -599,7 +630,17 @@ fn write_clipboard(text: String) {
         r#"
         const text = {text_json};
         if (navigator.clipboard && navigator.clipboard.writeText) {{
-            await navigator.clipboard.writeText(text);
+            navigator.clipboard.writeText(text).catch(() => {{
+                const textarea = document.createElement("textarea");
+                textarea.value = text;
+                textarea.style.position = "fixed";
+                textarea.style.opacity = "0";
+                document.body.appendChild(textarea);
+                textarea.focus();
+                textarea.select();
+                document.execCommand("copy");
+                textarea.remove();
+            }});
         }} else {{
             const textarea = document.createElement("textarea");
             textarea.value = text;
@@ -645,6 +686,28 @@ fn paste_into_cell_at_cursor(mut state: Signal<AppState>, row: usize, col: usize
     });
 }
 
+fn paste_into_selection(mut state: Signal<AppState>, row: usize, col: usize) {
+    spawn(async move {
+        let script = format!(
+            r#"
+            const editor = document.getElementById({id:?});
+            const paste = window.__cashewLastPaste || "";
+            if (!editor) {{
+                return paste;
+            }}
+
+            return paste;
+            "#,
+            id = format!("cell-{row}-{col}")
+        );
+
+        if let Ok(text) = dioxus::document::eval(&script).await {
+            let text = text.as_str().unwrap_or_default().to_string();
+            state.with_mut(|state| state.paste_selection(&text));
+        }
+    });
+}
+
 pub(crate) fn accept_highlighted_formula_completion(state: &mut AppState) -> bool {
     let matches = matching_functions(&state.formula_input);
     let Some(function) = matches
@@ -662,14 +725,25 @@ pub(crate) fn prepare_provider_work(
     state: &mut AppState,
     row: usize,
     col: usize,
+    approval_required: bool,
 ) -> Option<ProviderWork> {
     state
         .prepare_llm_for_cell(row, col)
         .map(ProviderWork::Llm)
         .or_else(|| {
             state
-                .prepare_generate_image_for_cell(row, col)
+                .prepare_generate_image_for_cell(row, col, approval_required)
                 .map(ProviderWork::GenerateImage)
+        })
+        .or_else(|| {
+            state
+                .prepare_generate_video_for_cell(row, col, approval_required)
+                .map(ProviderWork::GenerateVideo)
+        })
+        .or_else(|| {
+            state
+                .prepare_concatenate_video_for_cell(row, col)
+                .map(ProviderWork::ConcatenateVideo)
         })
 }
 
@@ -710,8 +784,67 @@ pub(crate) fn spawn_provider_work(state: Signal<AppState>, work: Option<Provider
                 .await;
             });
         }
+        Some(ProviderWork::GenerateVideo((
+            row,
+            col,
+            input,
+            cache_key,
+            request,
+            network_call_id,
+        ))) => {
+            spawn(async move {
+                AppState::run_generate_video_for_cell(
+                    state,
+                    row,
+                    col,
+                    input,
+                    cache_key,
+                    request,
+                    network_call_id,
+                )
+                .await;
+            });
+        }
+        Some(ProviderWork::ConcatenateVideo((row, col, input, cache_key, video_inputs))) => {
+            spawn(async move {
+                AppState::run_concatenate_video_for_cell(
+                    state,
+                    row,
+                    col,
+                    input,
+                    cache_key,
+                    video_inputs,
+                )
+                .await;
+            });
+        }
         None => {}
     }
+}
+
+pub(crate) fn queue_or_spawn_provider_work(mut state: Signal<AppState>, row: usize, col: usize) {
+    let approval_required = provider_requires_approval(&state.read(), row, col);
+    let work = state.with_mut(|state| prepare_provider_work(state, row, col, approval_required));
+
+    match (approval_required, work) {
+        (_, None) => {}
+        (true, Some(work)) => {
+            state.with_mut(|state| state.queue_pending_provider_call(work));
+        }
+        (false, Some(work)) => {
+            spawn_provider_work(state, Some(work));
+        }
+    }
+}
+
+fn provider_requires_approval(state: &AppState, row: usize, col: usize) -> bool {
+    state
+        .document
+        .active_sheet()
+        .and_then(|sheet| sheet.cell(row, col))
+        .and_then(|cell| function_for_formula_input(&cell.input))
+        .map(|function| !function.runs_without_approval)
+        .unwrap_or(false)
 }
 
 pub(crate) fn map_editor_text(value: String) -> String {

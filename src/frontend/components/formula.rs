@@ -4,9 +4,9 @@ use dioxus::prelude::*;
 use crate::backend::document::cell_key;
 use crate::backend::formulas::{FormulaFunction, matching_functions};
 
-use super::super::state::{AppState, should_show_completions};
+use super::super::state::{AppState, NetworkCallStatus, should_show_completions};
 use super::sheet::{
-    accept_highlighted_formula_completion, map_editor_text, prepare_provider_work,
+    accept_highlighted_formula_completion, map_editor_text, queue_or_spawn_provider_work,
     spawn_provider_work,
 };
 
@@ -16,10 +16,14 @@ pub(crate) fn FormulaBar(mut state: Signal<AppState>) -> Element {
     let (row, col) = snapshot.selected_cell;
     let address = cell_key(row, col);
     let formula_input = snapshot.formula_input.clone();
-    let formula_input_revision = snapshot.formula_input_revision;
     let completion_index = snapshot.completion_index;
+    let pending_provider_calls = snapshot
+        .network_calls
+        .iter()
+        .filter(|call| matches!(call.status, NetworkCallStatus::PendingApproval))
+        .count();
+    let pending_provider_calls_label = format!("Run {pending_provider_calls}");
     drop(snapshot);
-    let formula_input_key = format!("{row}-{col}-{formula_input_revision}");
     let formula_matches = matching_functions(&formula_input);
     let highlighted_completion = formula_matches
         .get(completion_index.min(formula_matches.len().saturating_sub(1)))
@@ -39,9 +43,8 @@ pub(crate) fn FormulaBar(mut state: Signal<AppState>) -> Element {
                     span { class: "formula-autocomplete-suffix", "{autocomplete_suffix}" }
                 }
                 input {
-                    key: "{formula_input_key}",
                     class: "formula-input",
-                    initial_value: "{formula_input}",
+                    value: "{formula_input}",
                     autocomplete: "off",
                     autocorrect: "off",
                     autocapitalize: "off",
@@ -50,12 +53,9 @@ pub(crate) fn FormulaBar(mut state: Signal<AppState>) -> Element {
                         state.completions_open = should_show_completions(&state.formula_input);
                     }),
                     onblur: move |_| {
-                        let work = state.with_mut(|state| {
-                            state.commit_formula_buffer();
-                            let (row, col) = state.selected_cell;
-                            prepare_provider_work(state, row, col)
-                        });
-                        spawn_provider_work(state, work);
+                        state.with_mut(|state| state.commit_formula_buffer());
+                        let (row, col) = state.read().selected_cell;
+                        queue_or_spawn_provider_work(state, row, col);
                     },
                     onkeydown: move |event| {
                         let matches = matching_functions(&state.read().formula_input);
@@ -86,13 +86,12 @@ pub(crate) fn FormulaBar(mut state: Signal<AppState>) -> Element {
                             }
                             Key::Enter => {
                                 event.prevent_default();
-                                let work = state.with_mut(|state| {
+                                let (row, col) = state.with_mut(|state| {
                                     state.commit_formula_buffer();
                                     state.finish_formula_edit();
-                                    let (row, col) = state.selected_cell;
-                                    prepare_provider_work(state, row, col)
+                                    state.selected_cell
                                 });
-                                spawn_provider_work(state, work);
+                                queue_or_spawn_provider_work(state, row, col);
                             }
                             _ => {}
                         }
@@ -103,6 +102,24 @@ pub(crate) fn FormulaBar(mut state: Signal<AppState>) -> Element {
                     }
                 }
                 FormulaCompletions { state }
+            }
+            if pending_provider_calls > 0 {
+                div { class: "formula-approval-slot",
+                    button {
+                        class: "formula-approval-button active",
+                        title: format!(
+                            "Run {} pending provider calls",
+                            pending_provider_calls
+                        ),
+                        onclick: move |_| {
+                            let works = state.with_mut(|state| state.dispatch_pending_provider_calls());
+                            for work in works {
+                                spawn_provider_work(state, Some(work));
+                            }
+                        },
+                        "{pending_provider_calls_label}"
+                    }
+                }
             }
         }
     }

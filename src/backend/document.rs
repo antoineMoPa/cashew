@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     cache::CacheEntry,
-    formula_implementations::{FormulaValue, evaluate_formula_for_sheet, format_number},
+    formula_implementations::{
+        FormulaValue, evaluate_formula_for_sheet, format_number, parse_cell_reference,
+    },
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -98,16 +100,12 @@ impl Sheet {
     pub fn set_cell_input(&mut self, row: usize, col: usize, input: String) {
         self.ensure_size(row + 1, col + 1);
 
-        let value = if input.trim().is_empty() {
-            CellValue::Empty
+        let (value, cache_key) = if input.trim().is_empty() {
+            (CellValue::Empty, None)
         } else if input.trim_start().starts_with('=') {
-            match evaluate_formula_for_sheet(&input, self) {
-                Ok(FormulaValue::Number(number)) => CellValue::Text(format_number(number)),
-                Ok(FormulaValue::Pending(message)) => CellValue::FormulaPending { message },
-                Err(error) => CellValue::Error(error),
-            }
+            formula_value_for_input(&input, self)
         } else {
-            CellValue::Text(input.clone())
+            (CellValue::Text(input.clone()), None)
         };
 
         self.cells.insert(
@@ -115,7 +113,7 @@ impl Sheet {
             Cell {
                 input,
                 value,
-                cache_key: None,
+                cache_key,
             },
         );
         self.recalculate_formulas();
@@ -130,19 +128,19 @@ impl Sheet {
                 .iter()
                 .filter_map(|(key, cell)| {
                     (cell.input.trim_start().starts_with('=')
-                        && !matches!(cell.value, CellValue::Cached(_))
-                        && cell.cache_key.is_none())
+                        && (cell.cache_key.is_none()
+                            || is_direct_cell_reference_formula(&cell.input)))
                     .then(|| (key.clone(), cell.input.clone()))
                 })
                 .collect::<Vec<_>>();
 
             let mut changed = false;
             for (key, input) in formulas {
-                let value = formula_value_for_input(&input, self);
+                let (value, cache_key) = formula_value_for_input(&input, self);
                 if let Some(cell) = self.cells.get_mut(&key) {
-                    changed |= cell.value != value;
+                    changed |= cell.value != value || cell.cache_key != cache_key;
                     cell.value = value;
-                    cell.cache_key = None;
+                    cell.cache_key = cache_key;
                 }
             }
 
@@ -205,12 +203,23 @@ impl Sheet {
     }
 }
 
-fn formula_value_for_input(input: &str, sheet: &Sheet) -> CellValue {
+fn formula_value_for_input(input: &str, sheet: &Sheet) -> (CellValue, Option<String>) {
     match evaluate_formula_for_sheet(input, sheet) {
-        Ok(FormulaValue::Number(number)) => CellValue::Text(format_number(number)),
-        Ok(FormulaValue::Pending(message)) => CellValue::FormulaPending { message },
-        Err(error) => CellValue::Error(error),
+        Ok(FormulaValue::Number(number)) => (CellValue::Text(format_number(number)), None),
+        Ok(FormulaValue::Text(value)) => (CellValue::Text(value), None),
+        Ok(FormulaValue::Cached { value, cache_key }) => (CellValue::Cached(value), cache_key),
+        Ok(FormulaValue::Pending(message)) => (CellValue::FormulaPending { message }, None),
+        Ok(FormulaValue::Empty) => (CellValue::Empty, None),
+        Err(error) => (CellValue::Error(error), None),
     }
+}
+
+fn is_direct_cell_reference_formula(input: &str) -> bool {
+    let Some(expression) = input.trim_start().strip_prefix('=') else {
+        return false;
+    };
+
+    parse_cell_reference(expression.trim()).is_ok()
 }
 
 pub const DEFAULT_COLUMN_WIDTH: u16 = 128;
@@ -321,6 +330,48 @@ mod tests {
                 .cell(0, 0)
                 .map(|cell| (&cell.value, cell.cache_key.as_deref())),
             Some((&CellValue::Cached("cached".to_string()), Some("cache-key")))
+        );
+    }
+
+    #[test]
+    fn direct_reference_formulas_recalculate_for_cached_values() {
+        let mut sheet = Sheet::new("Media", 1, 2);
+        sheet.set_cell_value_with_cache(
+            0,
+            0,
+            "https://example.com/a.png".to_string(),
+            CellValue::Cached("https://example.com/a.png".to_string()),
+            Some("cache-a".to_string()),
+        );
+        sheet.set_cell_input(0, 1, "=$A1".to_string());
+
+        assert_eq!(
+            sheet
+                .cell(0, 1)
+                .map(|cell| (&cell.value, cell.cache_key.as_deref())),
+            Some((
+                &CellValue::Cached("https://example.com/a.png".to_string()),
+                Some("cache-a")
+            ))
+        );
+
+        sheet.set_cell_value_with_cache(
+            0,
+            0,
+            "https://example.com/b.png".to_string(),
+            CellValue::Cached("https://example.com/b.png".to_string()),
+            Some("cache-b".to_string()),
+        );
+        sheet.recalculate_formulas();
+
+        assert_eq!(
+            sheet
+                .cell(0, 1)
+                .map(|cell| (&cell.value, cell.cache_key.as_deref())),
+            Some((
+                &CellValue::Cached("https://example.com/b.png".to_string()),
+                Some("cache-b")
+            ))
         );
     }
 }

@@ -170,6 +170,57 @@ impl AppState {
         );
         copied
     }
+
+    pub(crate) fn paste_selection(&mut self, text: &str) {
+        let rows = clipboard_text_to_rows(text);
+        let (start_row, start_col) = self.selected_cell;
+
+        let row_count = rows.len();
+        let col_count = rows.iter().map(Vec::len).max().unwrap_or(0);
+        if row_count == 0 || col_count == 0 {
+            self.set_cell_input(start_row, start_col, String::new());
+            self.selection_anchor = (start_row, start_col);
+            self.selection_end = (start_row, start_col);
+            self.selected_cell_mode = CellInteractionMode::Display;
+            self.editing_cell = None;
+            self.refresh_formula_input_from_cell(start_row, start_col);
+            self.completions_open = false;
+            self.completion_index = 0;
+            self.status = format!("Pasted {}", cell_key(start_row, start_col));
+            return;
+        }
+
+        for (row_offset, row_values) in rows.into_iter().enumerate() {
+            for (col_offset, value) in row_values.into_iter().enumerate() {
+                self.set_cell_input(
+                    start_row + row_offset,
+                    start_col + col_offset,
+                    value,
+                );
+            }
+        }
+
+        self.selection_anchor = (start_row, start_col);
+        self.selection_end = (
+            start_row + row_count.saturating_sub(1),
+            start_col + col_count.saturating_sub(1),
+        );
+        self.selected_cell = (start_row, start_col);
+        self.selected_cell_mode = CellInteractionMode::Display;
+        self.editing_cell = None;
+        self.refresh_formula_input_from_cell(start_row, start_col);
+        self.completions_open = false;
+        self.completion_index = 0;
+        self.status = format!(
+            "Pasted {}",
+            range_label(
+                start_row,
+                start_col,
+                self.selection_end.0,
+                self.selection_end.1
+            )
+        );
+    }
 }
 
 fn cell_value_for_copy(document: &CashewDocument, row: usize, col: usize) -> String {
@@ -217,6 +268,21 @@ fn cells_to_tsv(cells: &[Vec<String>]) -> String {
         .join("\n")
 }
 
+fn clipboard_text_to_rows(text: &str) -> Vec<Vec<String>> {
+    if text.is_empty() {
+        return vec![vec![String::new()]];
+    }
+
+    text.split_terminator('\n')
+        .map(|line| {
+            line.trim_end_matches('\r')
+                .split('\t')
+                .map(|cell| cell.to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,6 +306,31 @@ mod tests {
         assert_eq!(
             sheet.cell(0, 1).map(|cell| &cell.value),
             Some(&crate::backend::document::CellValue::Empty)
+        );
+    }
+
+    #[test]
+    fn paste_selection_fills_multiple_cells_from_tsv() {
+        let mut state = AppState::new();
+        state.begin_selection(0, 0, false);
+        state.paste_selection("first\tsecond\nthird\tfourth");
+
+        let sheet = state.document.active_sheet().unwrap();
+        assert_eq!(
+            sheet.cell(0, 0).map(|cell| &cell.value),
+            Some(&crate::backend::document::CellValue::Text("first".to_string()))
+        );
+        assert_eq!(
+            sheet.cell(0, 1).map(|cell| &cell.value),
+            Some(&crate::backend::document::CellValue::Text("second".to_string()))
+        );
+        assert_eq!(
+            sheet.cell(1, 0).map(|cell| &cell.value),
+            Some(&crate::backend::document::CellValue::Text("third".to_string()))
+        );
+        assert_eq!(
+            sheet.cell(1, 1).map(|cell| &cell.value),
+            Some(&crate::backend::document::CellValue::Text("fourth".to_string()))
         );
     }
 }

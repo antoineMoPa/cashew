@@ -9,6 +9,7 @@ const APP_CSS: &str = include_str!("styles.css");
 #[component]
 pub fn App() -> Element {
     let mut state = use_signal(AppState::new);
+    let bottom_panel_height = state.read().bottom_panel_height;
 
     let on_mouse_move = move |event: MouseEvent| {
         let coordinates = event.client_coordinates();
@@ -16,7 +17,7 @@ pub fn App() -> Element {
             if let Some(resizing) = state.resizing {
                 let coordinate = match resizing.kind {
                     ResizeKind::Column => coordinates.x as i32,
-                    ResizeKind::Row => coordinates.y as i32,
+                    ResizeKind::Row | ResizeKind::BottomPanel => coordinates.y as i32,
                 };
                 state.update_resize(coordinate);
             }
@@ -35,6 +36,7 @@ pub fn App() -> Element {
         main {
             class: "app",
             tabindex: "0",
+            style: "--bottom-panel-height: {bottom_panel_height}px;",
             onmousemove: on_mouse_move,
             onmouseup: on_mouse_up,
             onmouseleave: on_mouse_up,

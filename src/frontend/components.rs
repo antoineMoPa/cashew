@@ -12,6 +12,7 @@ mod status;
 pub(crate) use bottom_panel::BottomPanel;
 pub(crate) use formula::FormulaBar;
 pub(crate) use menu::MenuBar;
+pub(crate) use sheet::ProviderWork;
 pub(crate) use sheet::SettingsDialog;
 pub(crate) use sheet::SheetView;
 pub(crate) use status::StatusBar;
