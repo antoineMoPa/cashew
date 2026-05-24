@@ -126,6 +126,7 @@ pub(crate) fn SheetView(mut state: Signal<AppState>) -> Element {
         .collect::<Vec<_>>();
     let selected_cell = snapshot.selected_cell;
     let selection_range = snapshot.selection_range();
+    let selection_contains_multiple_cells = selection_range.contains_multiple_cells();
     let cell_modes = (0..rows)
         .map(|row| {
             (0..cols)
@@ -177,6 +178,13 @@ pub(crate) fn SheetView(mut state: Signal<AppState>) -> Element {
                             selected: selected_cell == (row, col),
                             mode: cell_modes[row][col],
                             in_selection: selection_range.contains(row, col),
+                            in_multi_cell_selection: selection_contains_multiple_cells,
+                            selection_top: selection_range.start_row == row,
+                            selection_bottom: selection_range.end_row == row,
+                            selection_left: selection_range.start_col == col,
+                            selection_right: selection_range.end_col == col,
+                            fill_handle_cell: selection_range.end_row == row
+                                && selection_range.end_col == col,
                         }
                     }
                 }
@@ -248,6 +256,12 @@ fn CellEditor(
     selected: bool,
     mode: CellInteractionMode,
     in_selection: bool,
+    in_multi_cell_selection: bool,
+    selection_top: bool,
+    selection_bottom: bool,
+    selection_left: bool,
+    selection_right: bool,
+    fill_handle_cell: bool,
 ) -> Element {
     let value = cell_display_value(cell.as_ref(), mode);
     let error_message = cell.as_ref().and_then(|cell| match &cell.value {
@@ -262,7 +276,42 @@ fn CellEditor(
     };
     let selected_class = if selected { " selected" } else { "" };
     let selection_class = if in_selection { " in-selection" } else { "" };
-    let class = format!("cell{}{}{}", status_class, selected_class, selection_class);
+    let multi_cell_selection_class = if in_selection && in_multi_cell_selection {
+        " multi-cell-selection"
+    } else {
+        ""
+    };
+    let selection_top_class = if in_selection && selection_top {
+        " selection-top"
+    } else {
+        ""
+    };
+    let selection_bottom_class = if in_selection && selection_bottom {
+        " selection-bottom"
+    } else {
+        ""
+    };
+    let selection_left_class = if in_selection && selection_left {
+        " selection-left"
+    } else {
+        ""
+    };
+    let selection_right_class = if in_selection && selection_right {
+        " selection-right"
+    } else {
+        ""
+    };
+    let class = format!(
+        "cell{}{}{}{}{}{}{}{}",
+        status_class,
+        selected_class,
+        selection_class,
+        multi_cell_selection_class,
+        selection_top_class,
+        selection_bottom_class,
+        selection_left_class,
+        selection_right_class
+    );
     let style = format!("width: {}px; height: {}px;", width, height);
     let media_preview = media_preview.filter(|_| mode != CellInteractionMode::FormulaEdit);
     let editor_id = format!("cell-{row}-{col}");
@@ -303,7 +352,9 @@ fn CellEditor(
                 },
                 onmouseenter: move |_| {
                     state.with_mut(|state| {
-                        if state.selecting {
+                        if state.fill_dragging.is_some() {
+                            state.update_fill_drag(row, col);
+                        } else if state.selecting {
                             state.extend_selection(row, col);
                         }
                     });
@@ -327,6 +378,16 @@ fn CellEditor(
                         src: "{media_uri}",
                         controls: true,
                         preload: "metadata"
+                    }
+                }
+                if fill_handle_cell && mode != CellInteractionMode::FormulaEdit {
+                    div {
+                        class: "cell-fill-handle",
+                        onmousedown: move |event| {
+                            event.prevent_default();
+                            event.stop_propagation();
+                            state.with_mut(|state| state.begin_fill_drag(row, col));
+                        }
                     }
                 }
                 if selected {
@@ -357,7 +418,9 @@ fn CellEditor(
                 },
                 onmouseenter: move |_| {
                     state.with_mut(|state| {
-                        if state.selecting {
+                        if state.fill_dragging.is_some() {
+                            state.update_fill_drag(row, col);
+                        } else if state.selecting {
                             state.extend_selection(row, col);
                         }
                     });
@@ -370,6 +433,16 @@ fn CellEditor(
                     paste_into_selection(state, row, col);
                 },
                 "{value}"
+                if fill_handle_cell && mode != CellInteractionMode::FormulaEdit {
+                    div {
+                        class: "cell-fill-handle",
+                        onmousedown: move |event| {
+                            event.prevent_default();
+                            event.stop_propagation();
+                            state.with_mut(|state| state.begin_fill_drag(row, col));
+                        }
+                    }
+                }
                 if selected {
                     if let Some(error) = error_message.clone() {
                         ErrorPopover { message: error }
@@ -401,7 +474,9 @@ fn CellEditor(
             },
             onmouseenter: move |_| {
                 state.with_mut(|state| {
-                    if state.selecting {
+                    if state.fill_dragging.is_some() {
+                        state.update_fill_drag(row, col);
+                    } else if state.selecting {
                         state.extend_selection(row, col);
                     }
                 });
@@ -427,6 +502,16 @@ fn CellEditor(
             onpaste: move |event| {
                 event.prevent_default();
                 paste_into_cell_at_cursor(state, row, col);
+            }
+        }
+        if fill_handle_cell && mode != CellInteractionMode::FormulaEdit {
+            div {
+                class: "cell-fill-handle",
+                onmousedown: move |event| {
+                    event.prevent_default();
+                    event.stop_propagation();
+                    state.with_mut(|state| state.begin_fill_drag(row, col));
+                }
             }
         }
         if selected {
@@ -538,6 +623,10 @@ fn handle_cell_keydown(mut state: Signal<AppState>, event: KeyboardEvent, row: u
 
     let extend = event.modifiers().shift();
     match event.key() {
+        Key::Backspace | Key::Delete if !editing_cell => {
+            event.prevent_default();
+            state.with_mut(AppState::clear_selection);
+        }
         Key::ArrowUp if !editing_cell => {
             event.prevent_default();
             state.with_mut(|state| {

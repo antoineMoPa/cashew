@@ -1,5 +1,6 @@
 use super::{
     document::{CellValue, Sheet},
+    fill::parse_cell_reference_parts,
     formulas::{FORMULA_FUNCTIONS, FormulaImplementation, MathFunction},
     providers::{
         fal_image::{
@@ -651,49 +652,8 @@ impl<'a> ExpressionParser<'a> {
 }
 
 pub fn parse_cell_reference(reference: &str) -> Result<(usize, usize), String> {
-    let mut chars = reference.trim().chars().peekable();
-
-    if chars.peek() == Some(&'$') {
-        chars.next();
-    }
-
-    let mut col = 0usize;
-    let mut saw_column = false;
-    while let Some(character) = chars.peek().copied() {
-        if character.is_ascii_alphabetic() {
-            saw_column = true;
-            let letter_value = (character.to_ascii_uppercase() as u8 - b'A' + 1) as usize;
-            col = col
-                .checked_mul(26)
-                .and_then(|value| value.checked_add(letter_value))
-                .ok_or_else(|| "Cell reference column is too large".to_string())?;
-            chars.next();
-        } else {
-            break;
-        }
-    }
-
-    if !saw_column {
-        return Err("Cell reference is missing a column".to_string());
-    }
-
-    if chars.peek() == Some(&'$') {
-        chars.next();
-    }
-
-    let row_text = chars.collect::<String>();
-    if row_text.is_empty() || !row_text.chars().all(|character| character.is_ascii_digit()) {
-        return Err("Cell reference is missing a row number".to_string());
-    }
-
-    let row = row_text
-        .parse::<usize>()
-        .map_err(|_| "Cell row is invalid".to_string())?;
-    if row == 0 {
-        return Err("Cell row must be 1 or greater".to_string());
-    }
-
-    Ok((row - 1, col - 1))
+    let parts = parse_cell_reference_parts(reference)?;
+    Ok((parts.row, parts.col))
 }
 
 pub fn format_number(value: f64) -> String {
@@ -720,6 +680,13 @@ mod tests {
         assert_eq!(
             evaluate_formula("=SUM(1, 2, 3*4)"),
             Ok(FormulaValue::Number(15.0))
+        );
+        let mut sheet = Sheet::new("Math", 2, 2);
+        sheet.set_cell_input(0, 0, "2".to_string());
+        sheet.set_cell_input(0, 1, "3".to_string());
+        assert_eq!(
+            evaluate_formula_for_sheet("=SUM(A1, B1, 5)", &sheet),
+            Ok(FormulaValue::Number(10.0))
         );
         assert_eq!(
             evaluate_formula("=AVERAGE(2, 4, 6)"),

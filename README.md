@@ -10,3 +10,11 @@ The app is split into two parts:
 - `Dioxus` desktop frontend for the spreadsheet UI, menus, formula bar, and panels
 
 Cashew is focused on prototyping workflows for text, image, video, and other AI-generated media while keeping the document portable and serializable.
+
+## Development
+
+Serve with
+
+```
+dx serve --desktop
+```

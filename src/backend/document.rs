@@ -5,9 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     cache::CacheEntry,
-    formula_implementations::{
-        FormulaValue, evaluate_formula_for_sheet, format_number, parse_cell_reference,
-    },
+    fill::{self, FillRange},
+    formula_implementations::{FormulaValue, evaluate_formula_for_sheet, format_number, parse_cell_reference},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -100,23 +99,17 @@ impl Sheet {
     pub fn set_cell_input(&mut self, row: usize, col: usize, input: String) {
         self.ensure_size(row + 1, col + 1);
 
-        let (value, cache_key) = if input.trim().is_empty() {
-            (CellValue::Empty, None)
-        } else if input.trim_start().starts_with('=') {
-            formula_value_for_input(&input, self)
-        } else {
-            (CellValue::Text(input.clone()), None)
-        };
-
-        self.cells.insert(
-            cell_key(row, col),
-            Cell {
-                input,
-                value,
-                cache_key,
-            },
-        );
+        self.set_cell_input_without_recalculate(row, col, input);
         self.recalculate_formulas();
+    }
+
+    pub fn fill_from_source(
+        &mut self,
+        source: FillRange,
+        target_row: usize,
+        target_col: usize,
+    ) -> Result<FillRange, String> {
+        fill::fill_region(self, source, (target_row, target_col))
     }
 
     pub fn recalculate_formulas(&mut self) {
@@ -201,6 +194,25 @@ impl Sheet {
         self.rows = self.rows.max(rows);
         self.cols = self.cols.max(cols);
     }
+
+    pub(crate) fn set_cell_input_without_recalculate(&mut self, row: usize, col: usize, input: String) {
+        let (value, cache_key) = if input.trim().is_empty() {
+            (CellValue::Empty, None)
+        } else if input.trim_start().starts_with('=') {
+            formula_value_for_input(&input, self)
+        } else {
+            (CellValue::Text(input.clone()), None)
+        };
+
+        self.cells.insert(
+            cell_key(row, col),
+            Cell {
+                input,
+                value,
+                cache_key,
+            },
+        );
+    }
 }
 
 fn formula_value_for_input(input: &str, sheet: &Sheet) -> (CellValue, Option<String>) {
@@ -245,7 +257,7 @@ pub fn column_name(mut col: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::cache::stable_cache_key;
+    use crate::backend::{cache::stable_cache_key, fill::FillRange};
 
     #[test]
     fn default_sheet_is_named_default() {
@@ -372,6 +384,26 @@ mod tests {
                 &CellValue::Cached("https://example.com/b.png".to_string()),
                 Some("cache-b")
             ))
+        );
+    }
+
+    #[test]
+    fn fill_from_source_expands_single_cell_pattern() {
+        let mut sheet = Sheet::new("Fill", 3, 3);
+        sheet.set_cell_input(1, 1, "=A1+$B1".to_string());
+
+        let filled = sheet
+            .fill_from_source(FillRange::new((1, 1), (1, 1)), 2, 2)
+            .unwrap();
+
+        assert_eq!(filled, FillRange::new((1, 1), (2, 2)));
+        assert_eq!(
+            sheet.cell(2, 2).map(|cell| cell.input.as_str()),
+            Some("=B2+$B2")
+        );
+        assert_eq!(
+            sheet.cell(1, 1).map(|cell| cell.input.as_str()),
+            Some("=A1+$B1")
         );
     }
 }

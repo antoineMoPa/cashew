@@ -1,0 +1,10 @@
+[application]
+name = "cashew"
+asset_dir = "public"
+
+[web.app]
+title = "Cashew AI Workflow Spreadsheet"
+
+[web.watcher]
+reload_html = true
+watch_path = ["src", "public"]

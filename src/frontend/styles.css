@@ -292,6 +292,8 @@ input {
     align-items: stretch;
     width: max-content;
     min-width: 100%;
+    user-select: none;
+    -webkit-user-select: none;
 }
 
 .corner-cell,
@@ -366,7 +368,13 @@ input {
     background: #fff;
     color: #202124;
     font-size: 13px;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+input.cell {
     user-select: text;
+    -webkit-user-select: text;
 }
 
 .cell:focus,
@@ -377,12 +385,60 @@ input {
 }
 
 .cell.in-selection {
+    position: relative;
     background: #e8f0fe;
+}
+
+.cell.in-selection::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    pointer-events: none;
+    border: 0 solid #1a73e8;
+}
+
+.cell.in-selection.selection-top::before {
+    border-top-width: 2px;
+}
+
+.cell.in-selection.selection-bottom::before {
+    border-bottom-width: 2px;
+}
+
+.cell.in-selection.selection-left::before {
+    border-left-width: 2px;
+}
+
+.cell.in-selection.selection-right::before {
+    border-right-width: 2px;
 }
 
 .cell.in-selection.selected,
 .cell.in-selection:focus {
     background: #fff;
+}
+
+.cell.multi-cell-selection.selected,
+.cell.multi-cell-selection:focus {
+    box-shadow: none;
+}
+
+.cell-fill-handle {
+    position: absolute;
+    right: -4px;
+    bottom: -4px;
+    z-index: 30;
+    width: 9px;
+    height: 9px;
+    border: 1px solid #fff;
+    background: #1a73e8;
+    box-shadow: 0 0 0 1px #1a73e8;
+    cursor: crosshair;
+}
+
+.cell-fill-handle:hover {
+    transform: scale(1.08);
 }
 
 .cell.formula {

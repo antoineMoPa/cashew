@@ -27,6 +27,7 @@ pub fn App() -> Element {
     let on_mouse_up = move |_| {
         state.with_mut(|state| {
             state.resizing = None;
+            state.finish_fill_drag();
             state.finish_selection();
         });
     };

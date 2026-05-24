@@ -9,6 +9,9 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use dioxus::prelude::WritableExt;
 
 use super::components::ProviderWork;
+use super::selection::SelectionRange;
+use super::selection::range_label;
+use crate::backend::fill::FillRange;
 use crate::backend::cache::{
     CacheEntry, CacheStatus, CachedValue, MediaAsset, MediaType, stable_cache_key,
 };
@@ -50,6 +53,7 @@ pub(crate) struct AppState {
     pub(crate) selection_anchor: (usize, usize),
     pub(crate) selection_end: (usize, usize),
     pub(crate) selecting: bool,
+    pub(crate) fill_dragging: Option<FillDrag>,
     pub(crate) formula_input: String,
     pub(crate) formula_input_revision: u64,
     pub(crate) resizing: Option<ResizeDrag>,
@@ -71,6 +75,11 @@ pub(crate) struct ResizeDrag {
     pub(crate) index: usize,
     pub(crate) start: i32,
     pub(crate) original: i32,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FillDrag {
+    pub(crate) source: FillRange,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -141,6 +150,7 @@ impl AppState {
             selection_anchor: (0, 0),
             selection_end: (0, 0),
             selecting: false,
+            fill_dragging: None,
             formula_input,
             formula_input_revision: 0,
             resizing: None,
@@ -159,6 +169,7 @@ impl AppState {
 
     pub(crate) fn set_selected_cell(&mut self, row: usize, col: usize) {
         self.ensure_work_area(row + GROWTH_BUFFER_ROWS, col + GROWTH_BUFFER_COLS);
+        self.fill_dragging = None;
         self.selected_cell = (row, col);
         self.selected_cell_mode = CellInteractionMode::Display;
         self.editing_cell = None;
@@ -282,7 +293,8 @@ impl AppState {
     }
 
     pub(crate) fn queue_pending_provider_call(&mut self, work: ProviderWork) {
-        self.pending_provider_calls.push(QueuedProviderCall { work });
+        self.pending_provider_calls
+            .push(QueuedProviderCall { work });
         self.status = "Queued provider call for approval".to_string();
     }
 
@@ -835,7 +847,7 @@ impl AppState {
     }
 
     pub(crate) fn insert_cell_reference(&mut self, row: usize, col: usize) {
-        let reference = absolute_column_reference(row, col);
+        let reference = cell_reference(row, col);
         let formula = if let Some(marker) = formula_reference_marker(&self.formula_input) {
             let mut formula = self.formula_input.clone();
             formula.replace_range(marker..marker + 1, &reference);
@@ -861,6 +873,7 @@ impl AppState {
         self.file_path = None;
         self.file_menu_open = false;
         self.dirty = false;
+        self.fill_dragging = None;
         self.status = "Created a new document".to_string();
         self.set_selected_cell(0, 0);
     }
@@ -881,6 +894,7 @@ impl AppState {
                 self.document = document;
                 self.file_path = Some(path.clone());
                 self.dirty = false;
+                self.fill_dragging = None;
                 self.status = format!("Opened {}", path.display());
                 self.set_selected_cell(0, 0);
             }
@@ -1032,6 +1046,88 @@ impl AppState {
     pub(crate) fn ensure_work_area(&mut self, rows: usize, cols: usize) {
         if let Some(sheet) = self.document.active_sheet_mut() {
             sheet.ensure_size(rows.max(MIN_VISIBLE_ROWS), cols.max(MIN_VISIBLE_COLS));
+        }
+    }
+
+    pub(crate) fn begin_fill_drag(&mut self, row: usize, col: usize) {
+        self.commit_formula_buffer_if_changed();
+        let source = self.current_selection_range();
+
+        self.ensure_work_area(
+            source.end_row.max(row) + GROWTH_BUFFER_ROWS,
+            source.end_col.max(col) + GROWTH_BUFFER_COLS,
+        );
+        self.fill_dragging = Some(FillDrag { source });
+        self.selecting = false;
+    }
+
+    pub(crate) fn update_fill_drag(&mut self, row: usize, col: usize) {
+        if self.fill_dragging.is_none() {
+            return;
+        }
+
+        self.ensure_work_area(row + GROWTH_BUFFER_ROWS, col + GROWTH_BUFFER_COLS);
+        self.selection_end = (row, col);
+    }
+
+    pub(crate) fn finish_fill_drag(&mut self) {
+        let Some(fill_drag) = self.fill_dragging.take() else {
+            return;
+        };
+
+        if fill_drag.source.contains(self.selection_end.0, self.selection_end.1) {
+            self.selecting = false;
+            return;
+        }
+
+        let Some(sheet) = self.document.active_sheet_mut() else {
+            self.status = "No active sheet available for fill".to_string();
+            self.selecting = false;
+            return;
+        };
+
+        match sheet.fill_from_source(fill_drag.source, self.selection_end.0, self.selection_end.1) {
+            Ok(filled) => {
+                self.dirty = true;
+                self.selection_anchor = (filled.start_row, filled.start_col);
+                self.selection_end = (filled.end_row, filled.end_col);
+                self.selected_cell = (filled.start_row, filled.start_col);
+                self.status = format!("Filled {}", range_label(
+                    filled.start_row,
+                    filled.start_col,
+                    filled.end_row,
+                    filled.end_col
+                ));
+            }
+            Err(error) => {
+                self.status = error;
+                self.selection_anchor = (fill_drag.source.start_row, fill_drag.source.start_col);
+                self.selection_end = (fill_drag.source.end_row, fill_drag.source.end_col);
+                self.selected_cell = (fill_drag.source.start_row, fill_drag.source.start_col);
+            }
+        }
+
+        self.selected_cell_mode = CellInteractionMode::Display;
+        self.editing_cell = None;
+        self.refresh_formula_input_from_cell(self.selected_cell.0, self.selected_cell.1);
+        self.completions_open = false;
+        self.completion_index = 0;
+        self.selecting = false;
+    }
+
+    fn current_selection_range(&self) -> FillRange {
+        let SelectionRange {
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+        } = self.selection_range();
+
+        FillRange {
+            start_row,
+            start_col,
+            end_row,
+            end_col,
         }
     }
 
@@ -1289,8 +1385,8 @@ pub(crate) fn should_show_completions(input: &str) -> bool {
     trimmed.starts_with('=') && !trimmed.contains('(')
 }
 
-fn absolute_column_reference(row: usize, col: usize) -> String {
-    format!("${}{}", column_name(col), row + 1)
+fn cell_reference(row: usize, col: usize) -> String {
+    format!("{}{}", column_name(col), row + 1)
 }
 
 fn formula_reference_separator(input: &str) -> &'static str {
@@ -1772,7 +1868,7 @@ mod tests {
 
         state.insert_cell_reference(1, 2);
 
-        assert_eq!(state.formula_input, "=LLM($C2, \"model\")");
+        assert_eq!(state.formula_input, "=LLM(C2, \"model\")");
     }
 
     #[test]

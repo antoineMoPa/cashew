@@ -27,6 +27,10 @@ impl SelectionRange {
         (self.start_row..=self.end_row).contains(&row)
             && (self.start_col..=self.end_col).contains(&col)
     }
+
+    pub(crate) fn contains_multiple_cells(&self) -> bool {
+        self.start_row != self.end_row || self.start_col != self.end_col
+    }
 }
 
 impl AppState {
@@ -143,6 +147,15 @@ impl AppState {
 
     pub(crate) fn cut_selection(&mut self) -> String {
         let copied = self.copy_selection();
+        self.clear_selection_with_status("Cut");
+        copied
+    }
+
+    pub(crate) fn clear_selection(&mut self) {
+        self.clear_selection_with_status("Cleared");
+    }
+
+    fn clear_selection_with_status(&mut self, action: &str) {
         let range = self.selection_range();
 
         for row in range.start_row..=range.end_row {
@@ -160,7 +173,8 @@ impl AppState {
         self.completions_open = false;
         self.completion_index = 0;
         self.status = format!(
-            "Cut {}",
+            "{} {}",
+            action,
             range_label(
                 range.start_row,
                 range.start_col,
@@ -168,7 +182,6 @@ impl AppState {
                 range.end_col
             )
         );
-        copied
     }
 
     pub(crate) fn paste_selection(&mut self, text: &str) {
@@ -192,11 +205,7 @@ impl AppState {
 
         for (row_offset, row_values) in rows.into_iter().enumerate() {
             for (col_offset, value) in row_values.into_iter().enumerate() {
-                self.set_cell_input(
-                    start_row + row_offset,
-                    start_col + col_offset,
-                    value,
-                );
+                self.set_cell_input(start_row + row_offset, start_col + col_offset, value);
             }
         }
 
@@ -250,7 +259,12 @@ fn cell_value_for_copy(document: &CashewDocument, row: usize, col: usize) -> Str
     }
 }
 
-fn range_label(start_row: usize, start_col: usize, end_row: usize, end_col: usize) -> String {
+pub(crate) fn range_label(
+    start_row: usize,
+    start_col: usize,
+    end_row: usize,
+    end_col: usize,
+) -> String {
     let start = cell_key(start_row, start_col);
     let end = cell_key(end_row, end_col);
     if start == end {
@@ -310,6 +324,29 @@ mod tests {
     }
 
     #[test]
+    fn clear_selection_deletes_selected_cells_without_copying() {
+        let mut state = AppState::new();
+        state.set_cell_input(0, 0, "first".to_string());
+        state.set_cell_input(0, 1, "second".to_string());
+        state.begin_selection(0, 0, false);
+        state.extend_selection(0, 1);
+        state.finish_selection();
+
+        state.clear_selection();
+
+        let sheet = state.document.active_sheet().unwrap();
+        assert_eq!(
+            sheet.cell(0, 0).map(|cell| &cell.value),
+            Some(&crate::backend::document::CellValue::Empty)
+        );
+        assert_eq!(
+            sheet.cell(0, 1).map(|cell| &cell.value),
+            Some(&crate::backend::document::CellValue::Empty)
+        );
+        assert_eq!(state.selection_range(), SelectionRange::new((0, 0), (0, 1)));
+    }
+
+    #[test]
     fn paste_selection_fills_multiple_cells_from_tsv() {
         let mut state = AppState::new();
         state.begin_selection(0, 0, false);
@@ -318,19 +355,27 @@ mod tests {
         let sheet = state.document.active_sheet().unwrap();
         assert_eq!(
             sheet.cell(0, 0).map(|cell| &cell.value),
-            Some(&crate::backend::document::CellValue::Text("first".to_string()))
+            Some(&crate::backend::document::CellValue::Text(
+                "first".to_string()
+            ))
         );
         assert_eq!(
             sheet.cell(0, 1).map(|cell| &cell.value),
-            Some(&crate::backend::document::CellValue::Text("second".to_string()))
+            Some(&crate::backend::document::CellValue::Text(
+                "second".to_string()
+            ))
         );
         assert_eq!(
             sheet.cell(1, 0).map(|cell| &cell.value),
-            Some(&crate::backend::document::CellValue::Text("third".to_string()))
+            Some(&crate::backend::document::CellValue::Text(
+                "third".to_string()
+            ))
         );
         assert_eq!(
             sheet.cell(1, 1).map(|cell| &cell.value),
-            Some(&crate::backend::document::CellValue::Text("fourth".to_string()))
+            Some(&crate::backend::document::CellValue::Text(
+                "fourth".to_string()
+            ))
         );
     }
 }
