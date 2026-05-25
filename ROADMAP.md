@@ -17,8 +17,12 @@ Easy
  - JSONEXTRACT(input, path)
  - CONCATENATE for strings
  - URL("https://...") -> extract image/model/text at url
-
-
+ - GENERATESFX
+ - GENERATETTS
+ - GENERATEMUSIC
+ - TRANSCRIBE
+ - COMBINE -> combine audio and video
+ - OVERLAY -> overlay images, video, etc
 
 
 ## Features
@@ -28,3 +32,4 @@ Easy
 - Undo/redo (menu + keyboard)
 - Scripting / User defined formulas
  - js-like scripting with formula calls, http requests, etc.
+- sound playback
