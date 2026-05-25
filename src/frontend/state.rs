@@ -18,10 +18,11 @@ use crate::backend::document::{CashewDocument, CellValue, cell_key, column_name}
 use crate::backend::fill::FillRange;
 use crate::backend::formula_implementations::{
     concatenate_video_inputs_for_sheet, generate_image_request_for_sheet,
-    generate_video_request_for_sheet, llm_request_for_sheet,
+    generate_video_request_for_sheet, llm_request_for_sheet, segment_request_for_sheet,
 };
 use crate::backend::formulas::FormulaFunction;
 use crate::backend::providers::fal_image::{FalImageClient, GenerateImageRequest};
+use crate::backend::providers::fal_segment::{FalSegmentClient, SegmentImageRequest};
 use crate::backend::providers::fal_video::{FalVideoClient, GenerateVideoRequest};
 use crate::backend::providers::openrouter::{OpenRouterClient, OpenRouterRequest};
 use crate::backend::settings::{UserSettings, settings_path};
@@ -118,6 +119,7 @@ pub(crate) struct NetworkCallRecord {
     pub(crate) status: NetworkCallStatus,
     pub(crate) request_body: serde_json::Value,
     pub(crate) image_inputs: Vec<String>,
+    pub(crate) error_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,7 +242,8 @@ impl AppState {
         let result = run_openrouter_request(&request).await;
 
         state.with_mut(|state| {
-            state.finish_network_call(network_call_id, result.is_ok());
+            let error_message = result.as_ref().err().map(ToString::to_string);
+            state.finish_network_call(network_call_id, result.is_ok(), error_message);
             state.finish_llm_for_cell(row, col, input, cache_key, result);
         });
     }
@@ -257,7 +260,8 @@ impl AppState {
         let result = run_generate_image_request(&request).await;
 
         state.with_mut(|state| {
-            state.finish_network_call(network_call_id, result.is_ok());
+            let error_message = result.as_ref().err().map(ToString::to_string);
+            state.finish_network_call(network_call_id, result.is_ok(), error_message);
             state.finish_generate_image_for_cell(row, col, input, cache_key, result);
         });
     }
@@ -274,8 +278,27 @@ impl AppState {
         let result = run_generate_video_request(&request).await;
 
         state.with_mut(|state| {
-            state.finish_network_call(network_call_id, result.is_ok());
+            let error_message = result.as_ref().err().map(ToString::to_string);
+            state.finish_network_call(network_call_id, result.is_ok(), error_message);
             state.finish_generate_video_for_cell(row, col, input, cache_key, result);
+        });
+    }
+
+    pub(crate) async fn run_segment_for_cell(
+        mut state: dioxus::prelude::Signal<Self>,
+        row: usize,
+        col: usize,
+        input: String,
+        cache_key: String,
+        request: SegmentImageRequest,
+        network_call_id: u64,
+    ) {
+        let result = run_segment_request(&request).await;
+
+        state.with_mut(|state| {
+            let error_message = result.as_ref().err().map(ToString::to_string);
+            state.finish_network_call(network_call_id, result.is_ok(), error_message);
+            state.finish_segment_for_cell(row, col, input, cache_key, result);
         });
     }
 
@@ -522,6 +545,82 @@ impl AppState {
         Some((row, col, input, cache_key, request, network_call_id))
     }
 
+    pub(crate) fn prepare_segment_for_cell(
+        &mut self,
+        row: usize,
+        col: usize,
+        approval_required: bool,
+    ) -> Option<(usize, usize, String, String, SegmentImageRequest, u64)> {
+        let sheet = self.document.active_sheet()?;
+        let cell = sheet.cell(row, col)?;
+        if !segment_cell_is_runnable(&cell.value) {
+            return None;
+        }
+
+        let input = cell.input.clone();
+        let request = match segment_request_for_sheet(&input, sheet) {
+            Ok(Some(request)) => request,
+            Ok(None) => return None,
+            Err(error) => {
+                if let Some(sheet) = self.document.active_sheet_mut() {
+                    sheet.set_cell_value_with_cache(row, col, input, CellValue::Error(error), None);
+                }
+                self.dirty = true;
+                return None;
+            }
+        };
+        let cache_key = segment_cache_key(&input, &request);
+
+        if let Some(cached) = cached_media_cell_value(&self.document, &cache_key) {
+            if let Some(sheet) = self.document.active_sheet_mut() {
+                sheet.set_cell_value_with_cache(
+                    row,
+                    col,
+                    input,
+                    CellValue::Cached(cached),
+                    Some(cache_key),
+                );
+            }
+            self.status = format!("Used cached segmentation result for {}", cell_key(row, col));
+            return None;
+        }
+
+        let pending_message = if approval_required {
+            "fal.segment request is pending approval".to_string()
+        } else {
+            "Running segmentation...".to_string()
+        };
+        if let Some(sheet) = self.document.active_sheet_mut() {
+            sheet.set_cell_value_with_cache(
+                row,
+                col,
+                input.clone(),
+                CellValue::FormulaPending {
+                    message: pending_message,
+                },
+                Some(cache_key.clone()),
+            );
+        }
+        self.status = if approval_required {
+            format!("Queued segmentation for {}", cell_key(row, col))
+        } else {
+            format!("Running segmentation for {}", cell_key(row, col))
+        };
+        let network_call_id = self.push_network_call(NetworkCallRecord::for_segment(
+            self.next_network_call_id,
+            row,
+            col,
+            if approval_required {
+                NetworkCallStatus::PendingApproval
+            } else {
+                NetworkCallStatus::Running
+            },
+            &request,
+        ));
+
+        Some((row, col, input, cache_key, request, network_call_id))
+    }
+
     pub(crate) fn prepare_concatenate_video_for_cell(
         &mut self,
         row: usize,
@@ -721,6 +820,60 @@ impl AppState {
             ) {
                 let width = sheet.column_width(col).max(GENERATED_VIDEO_COLUMN_WIDTH);
                 let height = sheet.row_height(row).max(GENERATED_VIDEO_ROW_HEIGHT);
+                sheet.set_column_width(col, width);
+                sheet.set_row_height(row, height);
+            }
+            sheet.recalculate_formulas();
+            self.dirty = true;
+        }
+    }
+
+    pub(crate) fn finish_segment_for_cell(
+        &mut self,
+        row: usize,
+        col: usize,
+        input: String,
+        cache_key: String,
+        result: anyhow::Result<MediaAsset>,
+    ) {
+        let value = match result {
+            Ok(asset) => {
+                let uri = asset.uri.clone();
+                self.document.cache.insert(
+                    cache_key.clone(),
+                    CacheEntry {
+                        key: cache_key.clone(),
+                        status: CacheStatus::Ready,
+                        value: CachedValue::MediaAsset(asset),
+                    },
+                );
+                self.status = format!("Segmentation completed for {}", cell_key(row, col));
+                CellValue::Cached(uri)
+            }
+            Err(error) => {
+                self.document.cache.insert(
+                    cache_key.clone(),
+                    CacheEntry {
+                        key: cache_key.clone(),
+                        status: CacheStatus::Failed {
+                            message: error.to_string(),
+                        },
+                        value: CachedValue::Json(serde_json::Value::Null),
+                    },
+                );
+                self.status = format!("Segmentation failed for {}", cell_key(row, col));
+                CellValue::Error(error.to_string())
+            }
+        };
+
+        if let Some(sheet) = self.document.active_sheet_mut() {
+            sheet.set_cell_value_with_cache(row, col, input, value, Some(cache_key));
+            if matches!(
+                sheet.cell(row, col).map(|cell| &cell.value),
+                Some(CellValue::Cached(_))
+            ) {
+                let width = sheet.column_width(col).max(GENERATED_IMAGE_COLUMN_WIDTH);
+                let height = sheet.row_height(row).max(GENERATED_IMAGE_ROW_HEIGHT);
                 sheet.set_column_width(col, width);
                 sheet.set_row_height(row, height);
             }
@@ -990,13 +1143,14 @@ impl AppState {
         id
     }
 
-    fn finish_network_call(&mut self, id: u64, ok: bool) {
+    fn finish_network_call(&mut self, id: u64, ok: bool, error_message: Option<String>) {
         if let Some(record) = self.network_calls.iter_mut().find(|record| record.id == id) {
             record.status = if ok {
                 NetworkCallStatus::Completed
             } else {
                 NetworkCallStatus::Failed
             };
+            record.error_message = error_message;
         }
     }
 
@@ -1171,15 +1325,17 @@ impl NetworkCallRecord {
         status: NetworkCallStatus,
         request: &OpenRouterRequest,
     ) -> Self {
+        let request_body = serde_json::to_value(request).unwrap_or(serde_json::Value::Null);
         Self {
             id,
             cell: cell_key(row, col),
             function_name: "LLM".to_string(),
             provider: "fal.openrouter".to_string(),
-            url: crate::backend::providers::openrouter::ENDPOINT.to_string(),
+            url: request.endpoint().to_string(),
             status,
-            request_body: serde_json::to_value(request).unwrap_or(serde_json::Value::Null),
-            image_inputs: Vec::new(),
+            request_body: request_body_without_images(&request_body),
+            image_inputs: image_inputs_from_body(&request_body),
+            error_message: None,
         }
     }
 
@@ -1205,6 +1361,7 @@ impl NetworkCallRecord {
             status,
             request_body: request_body_without_images(&request.input),
             image_inputs,
+            error_message: None,
         }
     }
 
@@ -1228,6 +1385,31 @@ impl NetworkCallRecord {
             status,
             request_body: request_body_without_images(&request.input),
             image_inputs: image_inputs_from_body(&request.input),
+            error_message: None,
+        }
+    }
+
+    fn for_segment(
+        id: u64,
+        row: usize,
+        col: usize,
+        status: NetworkCallStatus,
+        request: &SegmentImageRequest,
+    ) -> Self {
+        Self {
+            id,
+            cell: cell_key(row, col),
+            function_name: "SEGMENT".to_string(),
+            provider: "fal.segment".to_string(),
+            url: format!(
+                "{}/{}",
+                request.queue_api_base.trim_end_matches('/'),
+                request.endpoint
+            ),
+            status,
+            request_body: request_body_without_images(&request.input),
+            image_inputs: image_inputs_from_body(&request.input),
+            error_message: None,
         }
     }
 }
@@ -1271,6 +1453,20 @@ impl AppState {
                         (*input).clone(),
                         CellValue::FormulaPending {
                             message: "Running video generation...".to_string(),
+                        },
+                        Some((*cache_key).clone()),
+                    );
+                }
+                self.start_network_call(*network_call_id);
+            }
+            ProviderWork::Segment((row, col, input, cache_key, _, network_call_id)) => {
+                if let Some(sheet) = self.document.active_sheet_mut() {
+                    sheet.set_cell_value_with_cache(
+                        *row,
+                        *col,
+                        (*input).clone(),
+                        CellValue::FormulaPending {
+                            message: "Running segmentation...".to_string(),
                         },
                         Some((*cache_key).clone()),
                     );
@@ -1556,6 +1752,41 @@ async fn run_generate_image_request(request: &GenerateImageRequest) -> anyhow::R
     })
 }
 
+async fn run_segment_request(request: &SegmentImageRequest) -> anyhow::Result<MediaAsset> {
+    let client = FalSegmentClient::from_settings_or_env()?;
+    let response = client.run(request).await?;
+    let primary_image = response
+        .image
+        .clone()
+        .filter(|image| !image.url.is_empty())
+        .or_else(|| response.masks.first().cloned())
+        .ok_or_else(|| anyhow::anyhow!("fal segment response did not include any mask images"))?;
+    let mut metadata = serde_json::json!({
+        "model": request.endpoint,
+        "endpoint": request.endpoint,
+        "request": request.input,
+        "response": response,
+    });
+
+    let data_uri =
+        match persist_media_data(&primary_image.url, primary_image.content_type.as_deref()).await {
+            Ok(data_uri) => Some(data_uri),
+            Err(error) => {
+                metadata["persistence_warning"] =
+                    serde_json::Value::String(format!("Could not embed media data: {error}"));
+                None
+            }
+        };
+
+    Ok(MediaAsset {
+        provider: "fal.segment".to_string(),
+        media_type: MediaType::Image,
+        uri: primary_image.url.clone(),
+        data_uri,
+        metadata,
+    })
+}
+
 async fn run_generate_video_request(request: &GenerateVideoRequest) -> anyhow::Result<MediaAsset> {
     let client = FalVideoClient::from_settings_or_env()?;
     let response = client.run(request).await?;
@@ -1785,6 +2016,11 @@ fn generate_video_cache_key(input: &str, request: &GenerateVideoRequest) -> Stri
     stable_cache_key(input, &[request_json])
 }
 
+fn segment_cache_key(input: &str, request: &SegmentImageRequest) -> String {
+    let request_json = serde_json::to_string(request).unwrap_or_else(|_| request.prompt.clone());
+    stable_cache_key(input, &[request_json])
+}
+
 fn concatenate_video_cache_key(input: &str, video_inputs: &[String]) -> String {
     stable_cache_key(input, video_inputs)
 }
@@ -1834,6 +2070,14 @@ fn generate_image_cell_is_runnable(value: &CellValue) -> bool {
 fn generate_video_cell_is_runnable(value: &CellValue) -> bool {
     match value {
         CellValue::FormulaPending { message } => message == "fal.video request is ready to run",
+        CellValue::Error(_) => true,
+        CellValue::Empty | CellValue::Text(_) | CellValue::Cached(_) => false,
+    }
+}
+
+fn segment_cell_is_runnable(value: &CellValue) -> bool {
+    match value {
+        CellValue::FormulaPending { message } => message == "fal.segment request is ready to run",
         CellValue::Error(_) => true,
         CellValue::Empty | CellValue::Text(_) | CellValue::Cached(_) => false,
     }
@@ -1953,6 +2197,27 @@ mod tests {
     }
 
     #[test]
+    fn failed_network_calls_store_error_output_for_the_network_panel() {
+        let mut state = AppState::new();
+        let request = GenerateImageRequest::new(
+            "edit it",
+            "openai/gpt-image-2",
+            None,
+            vec!["https://example.com/ref.png".to_string()],
+        )
+        .unwrap();
+        let record =
+            NetworkCallRecord::for_generate_image(9, 1, 2, NetworkCallStatus::Running, &request);
+        state.push_network_call(record);
+
+        state.finish_network_call(9, false, Some("provider said no".to_string()));
+
+        let record = state.network_calls.iter().find(|record| record.id == 9).unwrap();
+        assert!(matches!(record.status, NetworkCallStatus::Failed));
+        assert_eq!(record.error_message.as_deref(), Some("provider said no"));
+    }
+
+    #[test]
     fn generate_image_network_record_extracts_and_sanitizes_images() {
         let request = GenerateImageRequest::new(
             "edit it",
@@ -1978,14 +2243,46 @@ mod tests {
     }
 
     #[test]
+    fn segment_network_record_extracts_image_input() {
+        let request = SegmentImageRequest::new(
+            "https://example.com/image.png",
+            "wheel",
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let record = NetworkCallRecord::for_segment(8, 1, 2, NetworkCallStatus::Running, &request);
+
+        assert_eq!(record.function_name, "SEGMENT");
+        assert_eq!(record.provider, "fal.segment");
+        assert_eq!(record.url, "https://queue.fal.run/fal-ai/sam-3/image");
+        assert_eq!(record.image_inputs, vec!["https://example.com/image.png"]);
+        assert_eq!(record.request_body["image_url"], "<shown in Images>");
+    }
+
+    #[test]
     fn openrouter_network_record_does_not_include_auth_data() {
-        let request = OpenRouterRequest::new("hello");
+        let request = OpenRouterRequest::new("hello").with_image_urls(vec![
+            "https://example.com/image.png".to_string(),
+        ]);
 
         let record = NetworkCallRecord::for_llm(3, 0, 0, NetworkCallStatus::Running, &request);
         let body = serde_json::to_string(&record.request_body).unwrap();
 
-        assert_eq!(record.url, crate::backend::providers::openrouter::ENDPOINT);
+        assert_eq!(
+            record.url,
+            crate::backend::providers::openrouter::VISION_ENDPOINT
+        );
+        assert_eq!(record.image_inputs, vec!["https://example.com/image.png"]);
         assert!(!body.contains("Authorization"));
         assert!(!body.contains("Key "));
+        assert!(body.contains("shown in Images"));
     }
 }

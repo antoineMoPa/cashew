@@ -35,6 +35,15 @@ type GenerateVideoWork = (
     u64,
 );
 
+type SegmentWork = (
+    usize,
+    usize,
+    String,
+    String,
+    crate::backend::providers::fal_segment::SegmentImageRequest,
+    u64,
+);
+
 type ConcatenateVideoWork = (usize, usize, String, String, Vec<String>);
 
 #[derive(Debug, Clone)]
@@ -42,6 +51,7 @@ pub(crate) enum ProviderWork {
     Llm(LlmWork),
     GenerateImage(GenerateImageWork),
     GenerateVideo(GenerateVideoWork),
+    Segment(SegmentWork),
     ConcatenateVideo(ConcatenateVideoWork),
 }
 
@@ -831,6 +841,11 @@ pub(crate) fn prepare_provider_work(
         })
         .or_else(|| {
             state
+                .prepare_segment_for_cell(row, col, approval_required)
+                .map(ProviderWork::Segment)
+        })
+        .or_else(|| {
+            state
                 .prepare_concatenate_video_for_cell(row, col)
                 .map(ProviderWork::ConcatenateVideo)
         })
@@ -883,6 +898,20 @@ pub(crate) fn spawn_provider_work(state: Signal<AppState>, work: Option<Provider
         ))) => {
             spawn(async move {
                 AppState::run_generate_video_for_cell(
+                    state,
+                    row,
+                    col,
+                    input,
+                    cache_key,
+                    request,
+                    network_call_id,
+                )
+                .await;
+            });
+        }
+        Some(ProviderWork::Segment((row, col, input, cache_key, request, network_call_id))) => {
+            spawn(async move {
+                AppState::run_segment_for_cell(
                     state,
                     row,
                     col,

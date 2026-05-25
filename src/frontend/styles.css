@@ -854,6 +854,33 @@ input.cell {
     overflow-x: auto;
 }
 
+.network-error {
+    margin: 8px 10px 0;
+    border: 1px solid #f1c7c2;
+    border-radius: 4px;
+    background: #fff8f7;
+}
+
+.network-error-title {
+    padding: 8px 8px 4px;
+    color: #b3261e;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.network-error-message {
+    margin: 0;
+    padding: 0 8px 8px;
+    color: #7f1d1d;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
 .network-image {
     width: 92px;
     height: 72px;

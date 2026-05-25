@@ -82,6 +82,69 @@ const GENERATE_IMAGE_ARGUMENTS: &[FormulaArgumentDoc] = &[
     },
 ];
 
+const SEGMENT_ARGUMENTS: &[FormulaArgumentDoc] = &[
+    FormulaArgumentDoc {
+        name: "image",
+        kind: "URL or data URI",
+        required: true,
+        description: "Source image URL or a cell reference resolving to one.",
+    },
+    FormulaArgumentDoc {
+        name: "prompt?",
+        kind: "text",
+        required: false,
+        description: "Optional segmentation prompt. Defaults to wheel.",
+    },
+    FormulaArgumentDoc {
+        name: "point_prompts?",
+        kind: "JSON array",
+        required: false,
+        description: "Optional JSON array of point prompt objects with x, y, label, and object_id fields.",
+    },
+    FormulaArgumentDoc {
+        name: "box_prompts?",
+        kind: "JSON array",
+        required: false,
+        description: "Optional JSON array of box prompt objects with x_min, y_min, x_max, y_max, and object_id fields.",
+    },
+    FormulaArgumentDoc {
+        name: "apply_mask?",
+        kind: "boolean",
+        required: false,
+        description: "Whether to apply the mask on the source image. Defaults to true.",
+    },
+    FormulaArgumentDoc {
+        name: "output_format?",
+        kind: "jpeg | png | webp",
+        required: false,
+        description: "Optional mask image format. Defaults to png.",
+    },
+    FormulaArgumentDoc {
+        name: "return_multiple_masks?",
+        kind: "boolean",
+        required: false,
+        description: "Return multiple mask candidates when true.",
+    },
+    FormulaArgumentDoc {
+        name: "max_masks?",
+        kind: "integer",
+        required: false,
+        description: "Maximum number of masks to return when multiple masks are enabled. Defaults to 3.",
+    },
+    FormulaArgumentDoc {
+        name: "include_scores?",
+        kind: "boolean",
+        required: false,
+        description: "Include per-mask confidence scores when true.",
+    },
+    FormulaArgumentDoc {
+        name: "include_boxes?",
+        kind: "boolean",
+        required: false,
+        description: "Include per-mask bounding boxes when true.",
+    },
+];
+
 const LLM_ARGUMENTS: &[FormulaArgumentDoc] = &[
     FormulaArgumentDoc {
         name: "prompt",
@@ -93,13 +156,19 @@ const LLM_ARGUMENTS: &[FormulaArgumentDoc] = &[
         name: "model",
         kind: "model id",
         required: false,
-        description: "OpenRouter model id routed through fal.",
+        description: "OpenRouter model id routed through fal. Defaults to Gemini 2.5 Flash.",
+    },
+    FormulaArgumentDoc {
+        name: "image...",
+        kind: "URL or data URI",
+        required: false,
+        description: "Optional image inputs. Put these before the optional system_prompt.",
     },
     FormulaArgumentDoc {
         name: "system_prompt",
         kind: "text",
         required: false,
-        description: "Optional system instruction text.",
+        description: "Optional system instruction text. Place it after any image inputs.",
     },
 ];
 
@@ -191,6 +260,24 @@ pub const FORMULA_FUNCTIONS: &[FormulaFunction] = &[
         },
     },
     FormulaFunction {
+        name: "SEGMENT",
+        signature: "SEGMENT(image, prompt?, point_prompts?, box_prompts?, apply_mask?, output_format?, return_multiple_masks?, max_masks?, include_scores?, include_boxes?)",
+        insert_text: "=SEGMENT(image, \"wheel\")",
+        runs_without_approval: false,
+        summary: "Segment objects in an image through fal SAM 3.",
+        details: "Runs through fal.ai's SAM 3 image segmentation endpoint. The first returned mask is stored in the cell while the full response remains in the document cache.",
+        arguments: SEGMENT_ARGUMENTS,
+        models: &[],
+        notes: &[
+            "Cache-first: identical formulas with identical resolved inputs reuse stored results.",
+            "Point and box prompt arguments accept JSON arrays or JSON objects stored in cells.",
+            "The primary mask preview is shown in the cell and the full response is preserved in cache metadata.",
+        ],
+        implementation: FormulaImplementation::ProviderAi {
+            provider: "fal.segment",
+        },
+    },
+    FormulaFunction {
         name: "GENERATEVIDEO",
         signature: "GENERATEVIDEO(prompt, image, model?, duration?, aspect_ratio?)",
         insert_text: "=GENERATEVIDEO(prompt, image, \"fal-ai/veo3.1/reference-to-video\", 8, \"16:9\")",
@@ -222,16 +309,18 @@ pub const FORMULA_FUNCTIONS: &[FormulaFunction] = &[
     },
     FormulaFunction {
         name: "LLM",
-        signature: "LLM(prompt, model, system_prompt)",
-        insert_text: "=LLM(prompt, \"google/gemini-2.5-flash\", system_prompt)",
+        signature: "LLM(prompt, model?, image..., system_prompt?)",
+        insert_text: "=LLM(prompt, \"google/gemini-2.5-flash\", image, system_prompt)",
         runs_without_approval: true,
         summary: "Generate or transform text through fal OpenRouter.",
-        details: "Runs through fal endpoint openrouter/router using the saved FAL key.",
+        details: "Runs through fal endpoint openrouter/router for text-only requests and openrouter/router/vision when image inputs are provided.",
         arguments: LLM_ARGUMENTS,
         models: LLM_MODELS,
         notes: &[
             "The model argument accepts OpenRouter model ids routed through fal.",
             "The listed model is the default used when the model argument is empty.",
+            "Image inputs must be URLs, data URIs, or cells that resolve to one.",
+            "When you provide images, place them before the optional system prompt.",
         ],
         implementation: FormulaImplementation::ProviderAi {
             provider: "fal.openrouter",
@@ -434,10 +523,11 @@ pub fn formula_example_for_function(
 
     match function.name {
         "GENERATEIMAGE" => format!("=GENERATEIMAGE(prompt, \"{model_id}\")"),
+        "SEGMENT" => "=SEGMENT(image, \"wheel\")".to_string(),
         "GENERATEVIDEO" => {
             format!("=GENERATEVIDEO(prompt, image, \"{model_id}\", 8, \"16:9\")")
         }
-        "LLM" => format!("=LLM(prompt, \"{model_id}\", system_prompt)"),
+        "LLM" => format!("=LLM(prompt, \"{model_id}\", image, system_prompt)"),
         _ => function.insert_text.to_string(),
     }
 }
@@ -500,6 +590,34 @@ mod tests {
     }
 
     #[test]
+    fn segment_docs_include_segmentation_specific_arguments() {
+        let function = FORMULA_FUNCTIONS
+            .iter()
+            .find(|function| function.name == "SEGMENT")
+            .unwrap();
+
+        assert!(!function.runs_without_approval);
+        assert!(
+            function
+                .arguments
+                .iter()
+                .any(|arg| arg.name == "point_prompts?")
+        );
+        assert!(
+            function
+                .arguments
+                .iter()
+                .any(|arg| arg.name == "box_prompts?")
+        );
+        assert!(
+            function
+                .arguments
+                .iter()
+                .any(|arg| arg.name == "output_format?")
+        );
+    }
+
+    #[test]
     fn expensive_provider_formulas_require_approval() {
         let image_function = FORMULA_FUNCTIONS
             .iter()
@@ -509,6 +627,10 @@ mod tests {
             .iter()
             .find(|function| function.name == "GENERATEVIDEO")
             .unwrap();
+        let segment_function = FORMULA_FUNCTIONS
+            .iter()
+            .find(|function| function.name == "SEGMENT")
+            .unwrap();
         let llm_function = FORMULA_FUNCTIONS
             .iter()
             .find(|function| function.name == "LLM")
@@ -516,6 +638,7 @@ mod tests {
 
         assert!(!image_function.runs_without_approval);
         assert!(!video_function.runs_without_approval);
+        assert!(!segment_function.runs_without_approval);
         assert!(llm_function.runs_without_approval);
     }
 
@@ -540,6 +663,22 @@ mod tests {
                 Some("fal-ai/kling-video/v3/standard/image-to-video")
             ),
             r#"=GENERATEVIDEO(prompt, image, "fal-ai/kling-video/v3/standard/image-to-video", 8, "16:9")"#
+        );
+        let segment_function = FORMULA_FUNCTIONS
+            .iter()
+            .find(|function| function.name == "SEGMENT")
+            .unwrap();
+        assert_eq!(
+            formula_example_for_function(*segment_function, None),
+            r#"=SEGMENT(image, "wheel")"#
+        );
+        let llm_function = FORMULA_FUNCTIONS
+            .iter()
+            .find(|function| function.name == "LLM")
+            .unwrap();
+        assert_eq!(
+            formula_example_for_function(*llm_function, Some("google/gemini-2.5-flash")),
+            r#"=LLM(prompt, "google/gemini-2.5-flash", image, system_prompt)"#
         );
     }
 }

@@ -6,6 +6,9 @@ use super::{
         fal_image::{
             DEFAULT_MODEL as DEFAULT_IMAGE_MODEL, GenerateImageRequest, parse_image_quality,
         },
+        fal_segment::{
+            SegmentBoxPrompt, SegmentImageRequest, SegmentOutputFormat, SegmentPointPrompt,
+        },
         fal_video::{GenerateVideoRequest, video_model_id_is_supported},
         openrouter::{DEFAULT_MODEL, OpenRouterRequest},
     },
@@ -90,8 +93,11 @@ pub fn llm_request_for_sheet(
     }
 
     let args = split_formula_arguments(args)?;
-    if args.is_empty() || args.len() > 3 {
-        return Err("LLM expects prompt, optional model, optional system_prompt".to_string());
+    if args.is_empty() {
+        return Err(
+            "LLM expects prompt, optional model, optional image inputs, optional system_prompt"
+                .to_string(),
+        );
     }
 
     let prompt = resolve_text_argument(&args[0], sheet)?;
@@ -101,18 +107,71 @@ pub fn llm_request_for_sheet(
         .transpose()?
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-    let system_prompt = args
-        .get(2)
+    let extra_args = args
+        .iter()
+        .skip(2)
         .map(|arg| resolve_text_argument(arg, sheet))
-        .transpose()?
-        .filter(|value| !value.trim().is_empty());
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
 
-    let mut request = OpenRouterRequest::new(prompt).with_model(model);
+    let (image_urls, system_prompt) = split_llm_extra_arguments(&extra_args)?;
+
+    let mut request = OpenRouterRequest::new(prompt)
+        .with_model(model)
+        .with_image_urls(image_urls);
     if let Some(system_prompt) = system_prompt {
         request = request.with_system_prompt(system_prompt);
     }
 
     Ok(Some(request))
+}
+
+fn split_llm_extra_arguments(args: &[String]) -> Result<(Vec<String>, Option<String>), String> {
+    if args.is_empty() {
+        return Ok((Vec::new(), None));
+    }
+
+    if args.len() == 1 {
+        return if llm_image_input(&args[0]) {
+            Ok((vec![args[0].clone()], None))
+        } else {
+            Ok((Vec::new(), Some(args[0].clone())))
+        };
+    }
+
+    if llm_image_input(args.last().unwrap()) {
+        if args.iter().all(|arg| llm_image_input(arg)) {
+            return Ok((args.to_vec(), None));
+        }
+
+        return Err(
+            "LLM image inputs must come before the optional system_prompt".to_string(),
+        );
+    }
+
+    let image_urls = args[..args.len() - 1]
+        .iter()
+        .map(|arg| {
+            if llm_image_input(arg) {
+                Ok(arg.clone())
+            } else {
+                Err("LLM image inputs must be URLs, data URIs, or cells that resolve to one"
+                    .to_string())
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok((image_urls, Some(args.last().cloned().unwrap())))
+}
+
+fn llm_image_input(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.starts_with("data:")
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with("http://")
 }
 
 pub fn generate_image_request_for_sheet(
@@ -175,6 +234,94 @@ pub fn generate_image_request_for_sheet(
     GenerateImageRequest::new(prompt, model, quality, image_urls)
         .map(Some)
         .map_err(|error| error.to_string())
+}
+
+pub fn segment_request_for_sheet(
+    input: &str,
+    sheet: &Sheet,
+) -> Result<Option<SegmentImageRequest>, String> {
+    let expression = input
+        .trim_start()
+        .strip_prefix('=')
+        .ok_or_else(|| "Formula must start with =".to_string())?
+        .trim();
+    let Some((name, args)) = parse_function_call(expression)? else {
+        return Ok(None);
+    };
+
+    if !name.eq_ignore_ascii_case("SEGMENT") {
+        return Ok(None);
+    }
+
+    let args = split_formula_arguments(args)?;
+    if args.is_empty() || args.len() > 10 {
+        return Err(
+            "SEGMENT expects image, optional prompt, optional point_prompts, optional box_prompts, optional apply_mask, optional output_format, optional return_multiple_masks, optional max_masks, optional include_scores, optional include_boxes"
+                .to_string(),
+        );
+    }
+
+    let image_url = resolve_text_argument(&args[0], sheet)?;
+    let prompt = args
+        .get(1)
+        .map(|arg| resolve_text_argument(arg, sheet))
+        .transpose()?
+        .unwrap_or_default();
+    let point_prompts = args
+        .get(2)
+        .map(|arg| resolve_segment_point_prompts(arg, sheet))
+        .transpose()?
+        .unwrap_or_default();
+    let box_prompts = args
+        .get(3)
+        .map(|arg| resolve_segment_box_prompts(arg, sheet))
+        .transpose()?
+        .unwrap_or_default();
+    let apply_mask = args
+        .get(4)
+        .map(|arg| resolve_optional_bool_argument(arg, sheet))
+        .transpose()?
+        .flatten();
+    let output_format = args
+        .get(5)
+        .map(|arg| resolve_segment_output_format(arg, sheet))
+        .transpose()?
+        .flatten();
+    let return_multiple_masks = args
+        .get(6)
+        .map(|arg| resolve_optional_bool_argument(arg, sheet))
+        .transpose()?
+        .flatten();
+    let max_masks = args
+        .get(7)
+        .map(|arg| resolve_optional_u32_argument(arg, sheet))
+        .transpose()?
+        .flatten();
+    let include_scores = args
+        .get(8)
+        .map(|arg| resolve_optional_bool_argument(arg, sheet))
+        .transpose()?
+        .flatten();
+    let include_boxes = args
+        .get(9)
+        .map(|arg| resolve_optional_bool_argument(arg, sheet))
+        .transpose()?
+        .flatten();
+
+    SegmentImageRequest::new(
+        image_url,
+        prompt,
+        point_prompts,
+        box_prompts,
+        apply_mask,
+        output_format,
+        return_multiple_masks,
+        max_masks,
+        include_scores,
+        include_boxes,
+    )
+    .map(Some)
+    .map_err(|error| error.to_string())
 }
 
 pub fn generate_video_request_for_sheet(
@@ -407,6 +554,90 @@ fn resolve_text_argument(arg: &str, sheet: &Sheet) -> Result<String, String> {
     }
 
     Ok(arg.to_string())
+}
+
+fn resolve_segment_point_prompts(
+    arg: &str,
+    sheet: &Sheet,
+) -> Result<Vec<SegmentPointPrompt>, String> {
+    let value = resolve_text_argument(arg, sheet)?;
+    parse_segment_prompt_list(&value, "point prompt")
+}
+
+fn resolve_segment_box_prompts(arg: &str, sheet: &Sheet) -> Result<Vec<SegmentBoxPrompt>, String> {
+    let value = resolve_text_argument(arg, sheet)?;
+    parse_segment_prompt_list(&value, "box prompt")
+}
+
+fn parse_segment_prompt_list<T>(value: &str, kind: &str) -> Result<Vec<T>, String>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if let Ok(values) = serde_json::from_str::<Vec<T>>(trimmed) {
+        return Ok(values);
+    }
+
+    serde_json::from_str::<T>(trimmed)
+        .map(|value| vec![value])
+        .map_err(|error| format!("Could not parse {kind} JSON: {error}"))
+}
+
+fn resolve_optional_bool_argument(arg: &str, sheet: &Sheet) -> Result<Option<bool>, String> {
+    let value = resolve_text_argument(arg, sheet)?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    trimmed
+        .parse::<bool>()
+        .map(Some)
+        .map_err(|error| format!("Could not parse boolean value `{trimmed}`: {error}"))
+}
+
+fn resolve_segment_output_format(
+    arg: &str,
+    sheet: &Sheet,
+) -> Result<Option<SegmentOutputFormat>, String> {
+    let value = resolve_text_argument(arg, sheet)?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let format = if trimmed.eq_ignore_ascii_case("jpeg") {
+        Some(SegmentOutputFormat::Jpeg)
+    } else if trimmed.eq_ignore_ascii_case("png") {
+        Some(SegmentOutputFormat::Png)
+    } else if trimmed.eq_ignore_ascii_case("webp") {
+        Some(SegmentOutputFormat::Webp)
+    } else {
+        None
+    };
+
+    format
+        .ok_or_else(|| {
+            format!("Unsupported SEGMENT output_format `{trimmed}`. Use jpeg, png, or webp.")
+        })
+        .map(Some)
+}
+
+fn resolve_optional_u32_argument(arg: &str, sheet: &Sheet) -> Result<Option<u32>, String> {
+    let value = resolve_text_argument(arg, sheet)?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    trimmed
+        .parse::<u32>()
+        .map(Some)
+        .map_err(|error| format!("Could not parse integer value `{trimmed}`: {error}"))
 }
 
 fn evaluate_math_function(function: MathFunction, args: &[f64]) -> Result<FormulaValue, String> {
@@ -707,6 +938,12 @@ mod tests {
             ))
         );
         assert_eq!(
+            evaluate_formula("=SEGMENT(A1)"),
+            Ok(FormulaValue::Pending(
+                "fal.segment request is ready to run".to_string()
+            ))
+        );
+        assert_eq!(
             evaluate_formula("=LLM(A1, A2)"),
             Ok(FormulaValue::Pending(
                 "fal.openrouter request is ready to run".to_string()
@@ -762,13 +999,35 @@ mod tests {
         let mut sheet = Sheet::new("LLM", 2, 2);
         sheet.set_cell_input(0, 0, "Say hi".to_string());
 
-        let request = llm_request_for_sheet(r#"=LLM($A1, "google/gemini-2.5-flash", "")"#, &sheet)
-            .unwrap()
-            .unwrap();
+        let request = llm_request_for_sheet(
+            r#"=LLM($A1, "google/gemini-2.5-flash", "", "Only answer in one sentence")"#,
+            &sheet,
+        )
+        .unwrap()
+        .unwrap();
 
         assert_eq!(request.prompt, "Say hi");
         assert_eq!(request.model, "google/gemini-2.5-flash");
-        assert_eq!(request.system_prompt, None);
+        assert_eq!(request.system_prompt.as_deref(), Some("Only answer in one sentence"));
+        assert!(request.image_urls.is_empty());
+    }
+
+    #[test]
+    fn builds_llm_vision_request_from_image_inputs() {
+        let mut sheet = Sheet::new("LLM Vision", 2, 3);
+        sheet.set_cell_input(0, 0, "Describe this image".to_string());
+        sheet.set_cell_input(0, 1, "https://example.com/image.png".to_string());
+        sheet.set_cell_input(0, 2, "Keep it brief".to_string());
+
+        let request = llm_request_for_sheet(r#"=LLM(A1, "", B1, C1)"#, &sheet)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(request.prompt, "Describe this image");
+        assert_eq!(request.model, DEFAULT_MODEL);
+        assert_eq!(request.image_urls, vec!["https://example.com/image.png"]);
+        assert_eq!(request.system_prompt.as_deref(), Some("Keep it brief"));
+        assert_eq!(request.endpoint(), crate::backend::providers::openrouter::VISION_ENDPOINT);
     }
 
     #[test]
@@ -828,6 +1087,45 @@ mod tests {
         assert_eq!(request.model, "flux/dev");
         assert_eq!(request.endpoint, "fal-ai/flux/dev/image-to-image");
         assert_eq!(request.input["image_url"], "https://example.com/ref.png");
+    }
+
+    #[test]
+    fn builds_segment_request_from_literals_and_cell_refs() {
+        let mut sheet = Sheet::new("Segment", 2, 10);
+        sheet.set_cell_input(0, 0, "https://example.com/image.png".to_string());
+        sheet.set_cell_input(0, 1, "A wheel".to_string());
+        sheet.set_cell_input(
+            0,
+            2,
+            r#"[{"x":10,"y":20,"label":1,"object_id":2}]"#.to_string(),
+        );
+        sheet.set_cell_input(
+            0,
+            3,
+            r#"{"x_min":1,"y_min":2,"x_max":30,"y_max":40}"#.to_string(),
+        );
+        sheet.set_cell_input(0, 4, "false".to_string());
+        sheet.set_cell_input(0, 5, "webp".to_string());
+        sheet.set_cell_input(0, 6, "true".to_string());
+        sheet.set_cell_input(0, 7, "4".to_string());
+        sheet.set_cell_input(0, 8, "true".to_string());
+        sheet.set_cell_input(0, 9, "false".to_string());
+
+        let request = segment_request_for_sheet(
+            r#"=SEGMENT($A1, $B1, $C1, $D1, $E1, $F1, $G1, $H1, $I1, $J1)"#,
+            &sheet,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(request.endpoint, "fal-ai/sam-3/image");
+        assert_eq!(request.prompt, "A wheel");
+        assert_eq!(request.output_format, "webp");
+        assert_eq!(request.input["apply_mask"], false);
+        assert_eq!(request.input["return_multiple_masks"], true);
+        assert_eq!(request.input["max_masks"], 4);
+        assert_eq!(request.input["point_prompts"][0]["object_id"], 2);
+        assert_eq!(request.input["box_prompts"][0]["x_max"], 30);
     }
 
     #[test]

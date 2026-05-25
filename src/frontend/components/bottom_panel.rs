@@ -273,6 +273,12 @@ fn NetworkCallItem(call: NetworkCallRecord) -> Element {
                     }
                 }
             }
+            if let Some(error) = call.error_message {
+                div { class: "network-error",
+                    div { class: "network-error-title", "Error output" }
+                    pre { class: "network-error-message", "{error}" }
+                }
+            }
             pre { class: "network-body", "{body}" }
         }
     }
