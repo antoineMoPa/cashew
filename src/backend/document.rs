@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use super::{
     cache::CacheEntry,
     fill::{self, FillRange},
-    formula_implementations::{FormulaValue, evaluate_formula_for_sheet, format_number, parse_cell_reference},
+    formula_implementations::{
+        FormulaValue, evaluate_formula_for_sheet, format_number, parse_cell_reference,
+    },
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -195,7 +197,12 @@ impl Sheet {
         self.cols = self.cols.max(cols);
     }
 
-    pub(crate) fn set_cell_input_without_recalculate(&mut self, row: usize, col: usize, input: String) {
+    pub(crate) fn set_cell_input_without_recalculate(
+        &mut self,
+        row: usize,
+        col: usize,
+        input: String,
+    ) {
         let (value, cache_key) = if input.trim().is_empty() {
             (CellValue::Empty, None)
         } else if input.trim_start().starts_with('=') {

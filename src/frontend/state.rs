@@ -9,13 +9,13 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use dioxus::prelude::WritableExt;
 
 use super::components::ProviderWork;
-use super::selection::SelectionRange;
 use super::selection::range_label;
-use crate::backend::fill::FillRange;
+use super::selection::{CopiedCells, SelectionRange};
 use crate::backend::cache::{
     CacheEntry, CacheStatus, CachedValue, MediaAsset, MediaType, stable_cache_key,
 };
 use crate::backend::document::{CashewDocument, CellValue, cell_key, column_name};
+use crate::backend::fill::FillRange;
 use crate::backend::formula_implementations::{
     concatenate_video_inputs_for_sheet, generate_image_request_for_sheet,
     generate_video_request_for_sheet, llm_request_for_sheet,
@@ -66,6 +66,7 @@ pub(crate) struct AppState {
     pub(crate) bottom_panel_tab: BottomPanelTab,
     pub(crate) network_calls: Vec<NetworkCallRecord>,
     pub(crate) pending_provider_calls: Vec<QueuedProviderCall>,
+    pub(crate) copied_cells: Option<CopiedCells>,
     next_network_call_id: u64,
 }
 
@@ -163,6 +164,7 @@ impl AppState {
             bottom_panel_tab: BottomPanelTab::FunctionDocs,
             network_calls: Vec::new(),
             pending_provider_calls: Vec::new(),
+            copied_cells: None,
             next_network_call_id: 1,
         }
     }
@@ -1075,7 +1077,10 @@ impl AppState {
             return;
         };
 
-        if fill_drag.source.contains(self.selection_end.0, self.selection_end.1) {
+        if fill_drag
+            .source
+            .contains(self.selection_end.0, self.selection_end.1)
+        {
             self.selecting = false;
             return;
         }
@@ -1092,12 +1097,15 @@ impl AppState {
                 self.selection_anchor = (filled.start_row, filled.start_col);
                 self.selection_end = (filled.end_row, filled.end_col);
                 self.selected_cell = (filled.start_row, filled.start_col);
-                self.status = format!("Filled {}", range_label(
-                    filled.start_row,
-                    filled.start_col,
-                    filled.end_row,
-                    filled.end_col
-                ));
+                self.status = format!(
+                    "Filled {}",
+                    range_label(
+                        filled.start_row,
+                        filled.start_col,
+                        filled.end_row,
+                        filled.end_col
+                    )
+                );
             }
             Err(error) => {
                 self.status = error;

@@ -1,6 +1,6 @@
 use crate::backend::{
     cache::{CacheStatus, CachedValue},
-    document::{CashewDocument, CellValue, cell_key},
+    document::{CashewDocument, Cell, CellValue, cell_key},
 };
 
 use super::state::{AppState, CellInteractionMode, GROWTH_BUFFER_COLS, GROWTH_BUFFER_ROWS};
@@ -11,6 +11,12 @@ pub(crate) struct SelectionRange {
     pub(crate) start_col: usize,
     pub(crate) end_row: usize,
     pub(crate) end_col: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CopiedCells {
+    text: String,
+    rows: Vec<Vec<Option<Cell>>>,
 }
 
 impl SelectionRange {
@@ -113,6 +119,7 @@ impl AppState {
             && self.selected_cell_mode == CellInteractionMode::Value
         {
             let text = cell_value_for_copy(&self.document, range.start_row, range.start_col);
+            self.copied_cells = None;
             self.status = format!(
                 "Copied value from {}",
                 cell_key(range.start_row, range.start_col)
@@ -120,12 +127,19 @@ impl AppState {
             return text;
         }
 
-        let cells = (range.start_row..=range.end_row)
+        let copied_rows = (range.start_row..=range.end_row)
             .map(|row| {
                 (range.start_col..=range.end_col)
-                    .map(|col| {
-                        sheet
-                            .cell(row, col)
+                    .map(|col| sheet.cell(row, col).cloned())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let cells = copied_rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| {
+                        cell.as_ref()
                             .map(|cell| cell.input.clone())
                             .unwrap_or_default()
                     })
@@ -133,6 +147,10 @@ impl AppState {
             })
             .collect::<Vec<_>>();
         let text = cells_to_tsv(&cells);
+        self.copied_cells = Some(CopiedCells {
+            text: text.clone(),
+            rows: copied_rows,
+        });
         self.status = format!(
             "Copied {}",
             range_label(
@@ -185,6 +203,13 @@ impl AppState {
     }
 
     pub(crate) fn paste_selection(&mut self, text: &str) {
+        if let Some(copied) = self.copied_cells.as_ref() {
+            if copied.text == text {
+                self.paste_copied_cells();
+                return;
+            }
+        }
+
         let rows = clipboard_text_to_rows(text);
         let (start_row, start_col) = self.selected_cell;
 
@@ -209,6 +234,66 @@ impl AppState {
             }
         }
 
+        self.selection_anchor = (start_row, start_col);
+        self.selection_end = (
+            start_row + row_count.saturating_sub(1),
+            start_col + col_count.saturating_sub(1),
+        );
+        self.selected_cell = (start_row, start_col);
+        self.selected_cell_mode = CellInteractionMode::Display;
+        self.editing_cell = None;
+        self.refresh_formula_input_from_cell(start_row, start_col);
+        self.completions_open = false;
+        self.completion_index = 0;
+        self.status = format!(
+            "Pasted {}",
+            range_label(
+                start_row,
+                start_col,
+                self.selection_end.0,
+                self.selection_end.1
+            )
+        );
+    }
+
+    fn paste_copied_cells(&mut self) {
+        let Some(copied) = self.copied_cells.clone() else {
+            return;
+        };
+        let (start_row, start_col) = self.selected_cell;
+
+        let row_count = copied.rows.len();
+        let col_count = copied.rows.iter().map(Vec::len).max().unwrap_or(0);
+        if row_count == 0 || col_count == 0 {
+            self.paste_selection("");
+            return;
+        }
+
+        self.ensure_work_area(
+            start_row + row_count + GROWTH_BUFFER_ROWS,
+            start_col + col_count + GROWTH_BUFFER_COLS,
+        );
+
+        if let Some(sheet) = self.document.active_sheet_mut() {
+            for (row_offset, row_values) in copied.rows.into_iter().enumerate() {
+                for (col_offset, cell) in row_values.into_iter().enumerate() {
+                    let row = start_row + row_offset;
+                    let col = start_col + col_offset;
+                    sheet.ensure_size(row + 1, col + 1);
+                    sheet.cells.insert(
+                        cell_key(row, col),
+                        cell.unwrap_or(Cell {
+                            input: String::new(),
+                            value: CellValue::Empty,
+                            cache_key: None,
+                        }),
+                    );
+                }
+            }
+            sheet.recalculate_formulas();
+        }
+
+        self.dirty = true;
         self.selection_anchor = (start_row, start_col);
         self.selection_end = (
             start_row + row_count.saturating_sub(1),
@@ -375,6 +460,40 @@ mod tests {
             sheet.cell(1, 1).map(|cell| &cell.value),
             Some(&crate::backend::document::CellValue::Text(
                 "fourth".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn paste_selection_preserves_internal_copied_cached_cell() {
+        let mut state = AppState::new();
+        state
+            .document
+            .active_sheet_mut()
+            .unwrap()
+            .set_cell_value_with_cache(
+                0,
+                0,
+                "=LLM(A2)".to_string(),
+                CellValue::Cached("cached answer".to_string()),
+                Some("cache-key".to_string()),
+            );
+
+        state.begin_selection(0, 0, false);
+        let copied = state.copy_selection();
+
+        state.begin_selection(1, 1, false);
+        state.paste_selection(&copied);
+
+        let sheet = state.document.active_sheet().unwrap();
+        assert_eq!(
+            sheet
+                .cell(1, 1)
+                .map(|cell| { (cell.input.as_str(), &cell.value, cell.cache_key.as_deref(),) }),
+            Some((
+                "=LLM(A2)",
+                &CellValue::Cached("cached answer".to_string()),
+                Some("cache-key")
             ))
         );
     }

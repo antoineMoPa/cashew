@@ -1,4 +1,4 @@
-use super::document::{column_name, Sheet};
+use super::document::{Sheet, column_name};
 
 const NUMBER_SERIES_STEP_TOLERANCE: f64 = 0.000_000_001;
 
@@ -504,8 +504,7 @@ mod tests {
     fn fills_relative_references_across_columns_and_rows() {
         let mut sheet = Sheet::new("Fill", 18, 5);
         sheet.set_cell_input(15, 2, "=C16".to_string());
-        let filled =
-            fill_region(&mut sheet, FillRange::new((15, 2), (15, 2)), (16, 3)).unwrap();
+        let filled = fill_region(&mut sheet, FillRange::new((15, 2), (15, 2)), (16, 3)).unwrap();
 
         assert_eq!(filled, FillRange::new((15, 2), (16, 3)));
         assert_eq!(
