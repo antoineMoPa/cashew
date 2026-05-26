@@ -1,8 +1,8 @@
 use dioxus::prelude::*;
 
 use crate::backend::formulas::{
-    FormulaFunction, FormulaModelDoc, formula_example_for_function, function_for_formula_input,
-    models_for_function,
+    FORMULA_FUNCTIONS, FormulaFunction, FormulaModelDoc, formula_example_for_function,
+    function_for_formula_input, models_for_function,
 };
 
 use super::super::state::{
@@ -53,7 +53,7 @@ pub(crate) fn BottomPanel(mut state: Signal<AppState>) -> Element {
             div { class: "bottom-panel-body",
                 match active_tab {
                     BottomPanelTab::FunctionDocs => rsx! {
-                        FunctionDocsPanel { formula_input }
+                        DocsPanel { formula_input }
                     },
                     BottomPanelTab::NetworkCalls => rsx! {
                         NetworkCallsPanel { calls }
@@ -82,7 +82,11 @@ fn TabButton(label: &'static str, active: bool, onclick: EventHandler<MouseEvent
 }
 
 #[component]
-fn FunctionDocsPanel(formula_input: String) -> Element {
+fn DocsPanel(formula_input: String) -> Element {
+    if formula_input.trim().is_empty() {
+        return rsx! { AllDocsPanel {} };
+    }
+
     let function = function_for_formula_input(&formula_input);
 
     let Some(function) = function else {
@@ -93,6 +97,11 @@ fn FunctionDocsPanel(formula_input: String) -> Element {
         };
     };
 
+    rsx! { FunctionDocsPanel { function } }
+}
+
+#[component]
+fn FunctionDocsPanel(function: FormulaFunction) -> Element {
     let models = models_for_function(function);
     let selected_model = use_signal(|| None::<String>);
     let active_model_id = selected_model
@@ -120,6 +129,33 @@ fn FunctionDocsPanel(formula_input: String) -> Element {
                 DocArguments { function }
                 DocModels { selected_model, active_model_id, models }
                 DocNotes { function }
+            }
+        }
+    }
+}
+
+#[component]
+fn AllDocsPanel() -> Element {
+    rsx! {
+        div { class: "function-docs",
+            div { class: "doc-header",
+                div {
+                    div { class: "doc-title", "All docs" }
+                    div { class: "doc-summary", "No cell is selected. Browse every available formula here." }
+                }
+                div { class: "doc-muted", "{FORMULA_FUNCTIONS.len()} formulas" }
+            }
+            div { class: "doc-index",
+                for function in FORMULA_FUNCTIONS {
+                    article { class: "doc-card",
+                        div { class: "doc-card-head",
+                            div { class: "doc-card-title", "{function.name}" }
+                            code { class: "doc-card-signature", "{function.signature}" }
+                        }
+                        div { class: "doc-summary", "{function.summary}" }
+                        div { class: "doc-description", "{function.details}" }
+                    }
+                }
             }
         }
     }

@@ -689,6 +689,47 @@ input.cell {
     gap: 14px;
 }
 
+.doc-index {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 8px;
+}
+
+.doc-card {
+    display: grid;
+    gap: 4px;
+    padding: 8px 10px;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    background: #fff;
+}
+
+.doc-card-head {
+    display: grid;
+    gap: 4px;
+}
+
+.doc-card-title {
+    color: #188038;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.doc-card-signature {
+    width: fit-content;
+    max-width: 100%;
+    padding: 4px 6px;
+    border: 1px solid #dadce0;
+    border-radius: 4px;
+    background: #f8f9fa;
+    color: #3c4043;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .doc-section h3 {
     margin: 0 0 8px;
     color: #202124;
@@ -917,6 +958,10 @@ input.cell {
     }
 
     .doc-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .doc-index {
         grid-template-columns: 1fr;
     }
 

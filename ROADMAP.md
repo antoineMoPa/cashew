@@ -15,7 +15,6 @@ Easy
  - SPLIT(string, delimiter, output range)
  - SEPARATECSV(input, output range)
  - JSONEXTRACT(input, path)
- - CONCATENATE for strings
  - URL("https://...") -> extract image/model/text at url
  - GENERATESFX
  - GENERATETTS

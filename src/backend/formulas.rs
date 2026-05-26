@@ -39,6 +39,7 @@ pub struct FormulaModelDoc {
 pub enum FormulaImplementation {
     ProviderAi { provider: &'static str },
     Math(MathFunction),
+    ConcatenateText,
     LocalVideoConcat,
 }
 
@@ -241,6 +242,13 @@ const TWO_NUMBER_ARGUMENTS: &[FormulaArgumentDoc] = &[
     },
 ];
 
+const CONCATENATE_ARGUMENTS: &[FormulaArgumentDoc] = &[FormulaArgumentDoc {
+    name: "text",
+    kind: "text",
+    required: true,
+    description: "One or more text values, cell references, or quoted string literals.",
+}];
+
 pub const FORMULA_FUNCTIONS: &[FormulaFunction] = &[
     FormulaFunction {
         name: "GENERATEIMAGE",
@@ -325,6 +333,18 @@ pub const FORMULA_FUNCTIONS: &[FormulaFunction] = &[
         implementation: FormulaImplementation::ProviderAi {
             provider: "fal.openrouter",
         },
+    },
+    FormulaFunction {
+        name: "CONCATENATE",
+        signature: "CONCATENATE(text, ...)",
+        insert_text: "=CONCATENATE(text1, text2)",
+        runs_without_approval: true,
+        summary: "Join text values together.",
+        details: "Concatenates text literals and text cell references into a single string.",
+        arguments: CONCATENATE_ARGUMENTS,
+        models: &[],
+        notes: &[],
+        implementation: FormulaImplementation::ConcatenateText,
     },
     FormulaFunction {
         name: "SUM",

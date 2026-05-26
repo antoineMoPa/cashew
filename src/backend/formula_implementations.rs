@@ -59,6 +59,10 @@ fn evaluate_formula_with_sheet(input: &str, sheet: Option<&Sheet>) -> Result<For
             FormulaImplementation::LocalVideoConcat => Ok(FormulaValue::Pending(
                 "Local video concatenation is ready to run".to_string(),
             )),
+            FormulaImplementation::ConcatenateText => {
+                let values = parse_text_arguments(args, sheet)?;
+                Ok(FormulaValue::Text(values.concat()))
+            }
             FormulaImplementation::Math(math) => {
                 let values = parse_numeric_arguments(args, sheet)?;
                 evaluate_math_function(math, &values)
@@ -467,6 +471,24 @@ fn parse_numeric_arguments(args: &str, sheet: Option<&Sheet>) -> Result<Vec<f64>
         .collect()
 }
 
+fn parse_text_arguments(args: &str, sheet: Option<&Sheet>) -> Result<Vec<String>, String> {
+    if args.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let arguments = split_formula_arguments(args)?;
+    match sheet {
+        Some(sheet) => arguments
+            .into_iter()
+            .map(|arg| resolve_text_argument(&arg, sheet))
+            .collect(),
+        None => arguments
+            .into_iter()
+            .map(|arg| resolve_text_argument_without_sheet(&arg))
+            .collect(),
+    }
+}
+
 fn resolve_single_cell_reference(
     expression: &str,
     sheet: Option<&Sheet>,
@@ -551,6 +573,17 @@ fn resolve_text_argument(arg: &str, sheet: &Sheet) -> Result<String, String> {
             Some(CellValue::Error(error)) => Err(format!("{arg} has an error: {error}")),
             Some(CellValue::Empty) | None => Ok(String::new()),
         };
+    }
+
+    Ok(arg.to_string())
+}
+
+fn resolve_text_argument_without_sheet(arg: &str) -> Result<String, String> {
+    let arg = arg.trim();
+    if arg.len() >= 2 && arg.starts_with('"') && arg.ends_with('"') {
+        return Ok(arg[1..arg.len() - 1]
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\"));
     }
 
     Ok(arg.to_string())
@@ -961,6 +994,10 @@ mod tests {
                 "Local video concatenation is ready to run".to_string()
             ))
         );
+        assert_eq!(
+            evaluate_formula(r#"=CONCATENATE("hello", " ", "world")"#),
+            Ok(FormulaValue::Text("hello world".to_string()))
+        );
     }
 
     #[test]
@@ -971,6 +1008,18 @@ mod tests {
         assert_eq!(
             evaluate_formula_for_sheet("=A1", &sheet),
             Ok(FormulaValue::Text("hello".to_string()))
+        );
+    }
+
+    #[test]
+    fn concatenates_text_values_from_cells_and_literals() {
+        let mut sheet = Sheet::new("Text", 2, 2);
+        sheet.set_cell_input(0, 0, "Hello".to_string());
+        sheet.set_cell_input(0, 1, "world".to_string());
+
+        assert_eq!(
+            evaluate_formula_for_sheet(r#"=CONCATENATE(A1, " ", B1, "!")"#, &sheet),
+            Ok(FormulaValue::Text("Hello world!".to_string()))
         );
     }
 
