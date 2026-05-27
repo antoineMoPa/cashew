@@ -13,6 +13,8 @@ use super::{
         openrouter::{DEFAULT_MODEL, OpenRouterRequest},
     },
 };
+use serde_json::Value;
+use serde_json_path::JsonPath;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FormulaValue {
@@ -62,6 +64,23 @@ fn evaluate_formula_with_sheet(input: &str, sheet: Option<&Sheet>) -> Result<For
             FormulaImplementation::ConcatenateText => {
                 let values = parse_text_arguments(args, sheet)?;
                 Ok(FormulaValue::Text(values.concat()))
+            }
+            FormulaImplementation::JsonExtract => {
+                let values = split_formula_arguments(args)?;
+                if values.len() != 2 {
+                    return Err("JSONEXTRACT expects input and path".to_string());
+                }
+
+                let input = match sheet {
+                    Some(sheet) => resolve_text_argument(&values[0], sheet)?,
+                    None => resolve_text_argument_without_sheet(&values[0])?,
+                };
+                let path = match sheet {
+                    Some(sheet) => resolve_text_argument(&values[1], sheet)?,
+                    None => resolve_text_argument_without_sheet(&values[1])?,
+                };
+                let extracted = json_extract(&input, &path)?;
+                Ok(FormulaValue::Text(extracted))
             }
             FormulaImplementation::Math(math) => {
                 let values = parse_numeric_arguments(args, sheet)?;
@@ -673,6 +692,42 @@ fn resolve_optional_u32_argument(arg: &str, sheet: &Sheet) -> Result<Option<u32>
         .map_err(|error| format!("Could not parse integer value `{trimmed}`: {error}"))
 }
 
+fn json_extract(input: &str, path: &str) -> Result<String, String> {
+    let parsed: Value = serde_json::from_str(input.trim())
+        .map_err(|error| format!("Could not parse JSON: {error}"))?;
+    let trimmed_path = path.trim();
+    if trimmed_path.is_empty() {
+        return Err("JSON path cannot be empty".to_string());
+    }
+
+    let query = JsonPath::parse(trimmed_path)
+        .map_err(|error| format!("Could not parse JSONPath: {error}"))?;
+    let matches = query.query(&parsed).all();
+    let value = match matches.as_slice() {
+        [] => return Ok(String::new()),
+        [value] => *value,
+        _ => return Err("JSONEXTRACT path must resolve to at most one value".to_string()),
+    };
+
+    if value.is_null() {
+        return Ok(String::new());
+    }
+
+    json_value_to_text(value)
+}
+
+fn json_value_to_text(value: &Value) -> Result<String, String> {
+    match value {
+        Value::Null => Ok(String::new()),
+        Value::Bool(value) => Ok(value.to_string()),
+        Value::Number(value) => Ok(value.to_string()),
+        Value::String(value) => Ok(value.clone()),
+        Value::Array(_) | Value::Object(_) => {
+            serde_json::to_string(value).map_err(|error| format!("Could not serialize JSON: {error}"))
+        }
+    }
+}
+
 fn evaluate_math_function(function: MathFunction, args: &[f64]) -> Result<FormulaValue, String> {
     let require_count = |count: usize| {
         if args.len() == count {
@@ -1040,6 +1095,67 @@ mod tests {
                 value: "https://example.com/image.png".to_string(),
                 cache_key: Some("cache-key".to_string()),
             })
+        );
+    }
+
+    #[test]
+    fn extracts_json_values_from_literals_and_cell_refs() {
+        let mut sheet = Sheet::new("JSON", 2, 2);
+        let json = r#"{"user":{"name":"Ada","active":true,"details":{"age":37}},"tags":["ai","art"]}"#;
+        sheet.set_cell_value_with_cache(
+            0,
+            0,
+            json.to_string(),
+            CellValue::Cached(json.to_string()),
+            Some("json-cache".to_string()),
+        );
+
+        assert_eq!(
+            evaluate_formula_for_sheet(r#"=JSONEXTRACT(A1, "$.user.name")"#, &sheet),
+            Ok(FormulaValue::Text("Ada".to_string()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                r#"=JSONEXTRACT("{\"user\":{\"name\":\"Ada\",\"active\":true,\"details\":{\"age\":37}},\"tags\":[\"ai\",\"art\"]}", "$.user")"#
+            ),
+            Ok(FormulaValue::Text(
+                r#"{"active":true,"details":{"age":37},"name":"Ada"}"#.to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn extracts_json_arrays_and_returns_empty_text_for_missing_paths() {
+        let mut sheet = Sheet::new("JSON Edge", 2, 2);
+        sheet.set_cell_input(0, 0, r#"{"items":[[{"name":"first"}],[{"name":"second"}]],"empty":null}"#.to_string());
+
+        assert_eq!(
+            evaluate_formula_for_sheet(r#"=JSONEXTRACT(A1, "$.items[0][0].name")"#, &sheet),
+            Ok(FormulaValue::Text("first".to_string()))
+        );
+        assert_eq!(
+            evaluate_formula_for_sheet(r#"=JSONEXTRACT(A1, "$.items[1]")"#, &sheet),
+            Ok(FormulaValue::Text(r#"[{"name":"second"}]"#.to_string()))
+        );
+        assert_eq!(
+            evaluate_formula_for_sheet(r#"=JSONEXTRACT(A1, "$.missing.path")"#, &sheet),
+            Ok(FormulaValue::Text(String::new()))
+        );
+        assert_eq!(
+            evaluate_formula_for_sheet(r#"=JSONEXTRACT(A1, "$.empty")"#, &sheet),
+            Ok(FormulaValue::Text(String::new()))
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_json_paths() {
+        assert_eq!(
+            evaluate_formula(r#"=JSONEXTRACT("{\"items\":[1]}", "")"#),
+            Err("JSON path cannot be empty".to_string())
+        );
+        assert_eq!(
+            evaluate_formula(r#"=JSONEXTRACT("{\"items\":[1,2]}", "$.items[*]")"#),
+            Err("JSONEXTRACT path must resolve to at most one value".to_string())
         );
     }
 

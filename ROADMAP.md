@@ -14,7 +14,6 @@ Medium
 Easy
  - SPLIT(string, delimiter, output range)
  - SEPARATECSV(input, output range)
- - JSONEXTRACT(input, path)
  - URL("https://...") -> extract image/model/text at url
  - GENERATESFX
  - GENERATETTS
@@ -28,6 +27,8 @@ Easy
 
 - Image file insertion (insert menu > image)
 - 3D model viewing in cells
+- Gaussian splat formulas + viewing + manipulation
+- 3d pipeline formulas (ex: voxelify, remesh, etc.)
 - Undo/redo (menu + keyboard)
 - Scripting / User defined formulas
  - js-like scripting with formula calls, http requests, etc.

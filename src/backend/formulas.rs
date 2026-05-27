@@ -41,6 +41,7 @@ pub enum FormulaImplementation {
     Math(MathFunction),
     ConcatenateText,
     LocalVideoConcat,
+    JsonExtract,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -249,6 +250,21 @@ const CONCATENATE_ARGUMENTS: &[FormulaArgumentDoc] = &[FormulaArgumentDoc {
     description: "One or more text values, cell references, or quoted string literals.",
 }];
 
+const JSON_EXTRACT_ARGUMENTS: &[FormulaArgumentDoc] = &[
+    FormulaArgumentDoc {
+        name: "input",
+        kind: "text",
+        required: true,
+        description: "JSON text, a quoted JSON literal, or a cell reference resolving to JSON text.",
+    },
+    FormulaArgumentDoc {
+        name: "path",
+        kind: "JSONPath",
+        required: true,
+        description: "JSONPath query string, for example $.user.name or $.items[0].title.",
+    },
+];
+
 pub const FORMULA_FUNCTIONS: &[FormulaFunction] = &[
     FormulaFunction {
         name: "GENERATEIMAGE",
@@ -333,6 +349,22 @@ pub const FORMULA_FUNCTIONS: &[FormulaFunction] = &[
         implementation: FormulaImplementation::ProviderAi {
             provider: "fal.openrouter",
         },
+    },
+    FormulaFunction {
+        name: "JSONEXTRACT",
+        signature: "JSONEXTRACT(input, path)",
+        insert_text: "=JSONEXTRACT(input, \"$.field\")",
+        runs_without_approval: true,
+        summary: "Extract a value from JSON text.",
+        details: "Parses JSON input and evaluates a JSONPath query. Strings, numbers, and booleans return text; arrays and objects return compact JSON; null and missing paths return empty text. Queries matching multiple values return an error.",
+        arguments: JSON_EXTRACT_ARGUMENTS,
+        models: &[],
+        notes: &[
+            "JSON input can come from a quoted literal or a text/cached cell reference.",
+            "Missing paths and null values return empty text.",
+            "JSONEXTRACT is for single-value extraction; JSONPath queries that match multiple nodes are rejected.",
+        ],
+        implementation: FormulaImplementation::JsonExtract,
     },
     FormulaFunction {
         name: "CONCATENATE",

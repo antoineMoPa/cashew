@@ -1,0 +1,4 @@
+interface:
+  display_name: "Implement Formula"
+  short_description: "Implement a Cashew roadmap formula"
+  default_prompt: "Use $implement-formula to implement the next Cashew formula from ROADMAP.md."
