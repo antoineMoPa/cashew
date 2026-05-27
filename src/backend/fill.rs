@@ -12,6 +12,15 @@ pub struct CellReferenceParts {
     pub col_absolute: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormulaReference {
+    pub row: usize,
+    pub col: usize,
+    pub start: usize,
+    pub end: usize,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FillRange {
     pub start_row: usize,
@@ -72,16 +81,7 @@ pub fn fill_region(
             } else {
                 let source_row = source.start_row + ((row - source.start_row) % source.height());
                 let source_col = source.start_col + ((col - source.start_col) % source.width());
-                let row_delta = row as isize - source_row as isize;
-                let col_delta = col as isize - source_col as isize;
-                offset_formula_references(
-                    sheet
-                        .cell(source_row, source_col)
-                        .map(|cell| cell.input.as_str())
-                        .unwrap_or_default(),
-                    row_delta,
-                    col_delta,
-                )?
+                input_for_fill_target(sheet, source, target, source_row, source_col, row, col)?
             };
             updates.push((row, col, input));
         }
@@ -93,6 +93,31 @@ pub fn fill_region(
 
     sheet.recalculate_formulas();
     Ok(target)
+}
+
+fn input_for_fill_target(
+    sheet: &Sheet,
+    source: FillRange,
+    target: FillRange,
+    source_row: usize,
+    source_col: usize,
+    row: usize,
+    col: usize,
+) -> Result<String, String> {
+    let input = sheet
+        .cell(source_row, source_col)
+        .map(|cell| cell.input.as_str())
+        .unwrap_or_default();
+
+    if source.height() == 1 && target.height() == 1 && source.width() >= 2 {
+        if let Some(input) = offset_horizontal_formula_pattern(sheet, source, input, col)? {
+            return Ok(input);
+        }
+    }
+
+    let row_delta = row as isize - source_row as isize;
+    let col_delta = col as isize - source_col as isize;
+    offset_formula_references(input, row_delta, col_delta)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -312,17 +337,64 @@ pub fn offset_formula_references(
     let prefix_len = input.len() - trimmed_start.len();
     let prefix = &input[..prefix_len];
     let expression = &trimmed_start[1..];
-    let rewritten = rewrite_formula_expression(expression, row_delta, col_delta)?;
+    let rewritten = rewrite_formula_expression(expression, |reference, _| {
+        shift_reference(reference, row_delta, col_delta)
+    })?;
     Ok(format!("{prefix}={rewritten}"))
 }
 
-fn rewrite_formula_expression(
+pub fn formula_references(input: &str) -> Vec<FormulaReference> {
+    let trimmed_start = input.trim_start();
+    if !trimmed_start.starts_with('=') {
+        return Vec::new();
+    }
+
+    let expression_start = input.len() - trimmed_start.len() + 1;
+    formula_references_for_expression(&trimmed_start[1..], expression_start)
+}
+
+fn formula_references_for_expression(expression: &str, expression_start: usize) -> Vec<FormulaReference> {
+    let mut references = Vec::new();
+    let mut index = 0;
+
+    while index < expression.len() {
+        let Some(character) = expression[index..].chars().next() else {
+            break;
+        };
+
+        if character == '"' || character == '\'' {
+            index = skip_quoted_text(expression, index, character);
+            continue;
+        }
+
+        if let Some((reference, end)) = parse_reference_at(expression, index) {
+            references.push(FormulaReference {
+                row: reference.row,
+                col: reference.col,
+                start: expression_start + index,
+                end: expression_start + end,
+                text: expression[index..end].to_string(),
+            });
+            index = end;
+            continue;
+        }
+
+        index += character.len_utf8();
+    }
+
+    references
+}
+
+fn rewrite_formula_expression<F>(
     expression: &str,
-    row_delta: isize,
-    col_delta: isize,
-) -> Result<String, String> {
+    mut map_reference: F,
+) -> Result<String, String>
+where
+    F: FnMut(CellReferenceParts, usize) -> Result<String, String>,
+{
     let mut rewritten = String::with_capacity(expression.len());
     let mut index = 0;
+    let mut reference_index = 0;
 
     while index < expression.len() {
         let Some(character) = expression[index..].chars().next() else {
@@ -337,7 +409,8 @@ fn rewrite_formula_expression(
         }
 
         if let Some((reference, end)) = parse_reference_at(expression, index) {
-            rewritten.push_str(&shift_reference(reference, row_delta, col_delta)?);
+            rewritten.push_str(&map_reference(reference, reference_index)?);
+            reference_index += 1;
             index = end;
             continue;
         }
@@ -347,6 +420,138 @@ fn rewrite_formula_expression(
     }
 
     Ok(rewritten)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReferenceStep {
+    first_row: usize,
+    first_col: usize,
+    row_step: isize,
+    col_step: isize,
+}
+
+fn offset_horizontal_formula_pattern(
+    sheet: &Sheet,
+    source: FillRange,
+    input: &str,
+    target_col: usize,
+) -> Result<Option<String>, String> {
+    let trimmed_start = input.trim_start();
+    if !trimmed_start.starts_with('=') {
+        return Ok(None);
+    }
+
+    let reference_steps = horizontal_reference_steps(sheet, source);
+    if reference_steps.is_empty() {
+        return Ok(None);
+    }
+
+    let prefix_len = input.len() - trimmed_start.len();
+    let prefix = &input[..prefix_len];
+    let expression = &trimmed_start[1..];
+    let target_offset = target_col as isize - source.start_col as isize;
+    let rewritten = rewrite_formula_expression(expression, |reference, reference_index| {
+        let Some(Some(step)) = reference_steps.get(reference_index) else {
+            return shift_reference(reference, 0, target_col as isize - source.start_col as isize);
+        };
+
+        let row = if reference.row_absolute {
+            reference.row
+        } else {
+            step.first_row
+                .checked_add_signed(step.row_step * target_offset)
+                .ok_or_else(|| "Cell reference moved outside the sheet".to_string())?
+        };
+        let col = if reference.col_absolute {
+            reference.col
+        } else {
+            step.first_col
+                .checked_add_signed(step.col_step * target_offset)
+                .ok_or_else(|| "Cell reference moved outside the sheet".to_string())?
+        };
+
+        Ok(format!(
+            "{}{}{}{}",
+            if reference.col_absolute { "$" } else { "" },
+            column_name(col),
+            if reference.row_absolute { "$" } else { "" },
+            row + 1
+        ))
+    })?;
+
+    Ok(Some(format!("{prefix}={rewritten}")))
+}
+
+fn horizontal_reference_steps(sheet: &Sheet, source: FillRange) -> Vec<Option<ReferenceStep>> {
+    let references_by_cell = (source.start_col..=source.end_col)
+        .map(|col| {
+            sheet.cell(source.start_row, col)
+                .map(|cell| reference_parts_for_formula(&cell.input))
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>();
+
+    let Some(first_references) = references_by_cell.first() else {
+        return Vec::new();
+    };
+
+    (0..first_references.len())
+        .map(|reference_index| {
+            let first = *first_references.get(reference_index)?;
+            let second = *references_by_cell.get(1)?.get(reference_index)?;
+            let row_step = second.row as isize - first.row as isize;
+            let col_step = second.col as isize - first.col as isize;
+
+            let has_consistent_step = references_by_cell
+                .windows(2)
+                .all(|pair| match (pair[0].get(reference_index), pair[1].get(reference_index)) {
+                    (Some(previous), Some(current)) => {
+                        current.row as isize - previous.row as isize == row_step
+                            && current.col as isize - previous.col as isize == col_step
+                    }
+                    _ => false,
+                });
+
+            has_consistent_step.then_some(ReferenceStep {
+                first_row: first.row,
+                first_col: first.col,
+                row_step,
+                col_step,
+            })
+        })
+        .collect()
+}
+
+fn reference_parts_for_formula(input: &str) -> Vec<CellReferenceParts> {
+    let trimmed_start = input.trim_start();
+    if !trimmed_start.starts_with('=') {
+        return Vec::new();
+    }
+
+    let expression = &trimmed_start[1..];
+    let mut references = Vec::new();
+    let mut index = 0;
+
+    while index < expression.len() {
+        let Some(character) = expression[index..].chars().next() else {
+            break;
+        };
+
+        if character == '"' || character == '\'' {
+            index = skip_quoted_text(expression, index, character);
+            continue;
+        }
+
+        if let Some((reference, end)) = parse_reference_at(expression, index) {
+            references.push(reference);
+            index = end;
+            continue;
+        }
+
+        index += character.len_utf8();
+    }
+
+    references
 }
 
 fn parse_reference_at(expression: &str, start: usize) -> Option<(CellReferenceParts, usize)> {

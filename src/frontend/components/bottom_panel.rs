@@ -2,7 +2,8 @@ use dioxus::prelude::*;
 
 use crate::backend::formulas::{
     FORMULA_FUNCTIONS, FormulaFunction, FormulaModelDoc, formula_example_for_function,
-    function_for_formula_input, models_for_function,
+    function_for_formula_input, matching_functions, models_for_function,
+    related_functions_for_function,
 };
 
 use super::super::state::{
@@ -53,7 +54,7 @@ pub(crate) fn BottomPanel(mut state: Signal<AppState>) -> Element {
             div { class: "bottom-panel-body",
                 match active_tab {
                     BottomPanelTab::FunctionDocs => rsx! {
-                        DocsPanel { formula_input }
+                        DocsPanel { state, formula_input }
                     },
                     BottomPanelTab::NetworkCalls => rsx! {
                         NetworkCallsPanel { calls }
@@ -82,27 +83,73 @@ fn TabButton(label: &'static str, active: bool, onclick: EventHandler<MouseEvent
 }
 
 #[component]
-fn DocsPanel(formula_input: String) -> Element {
+fn DocsPanel(mut state: Signal<AppState>, formula_input: String) -> Element {
     if formula_input.trim().is_empty() {
         return rsx! { AllDocsPanel {} };
     }
 
     let function = function_for_formula_input(&formula_input);
 
-    let Some(function) = function else {
+    if let Some(function) = function {
+        return rsx! { FunctionDocsPanel { function } };
+    }
+
+    let matches = matching_functions(&formula_input);
+
+    if matches.is_empty() {
         return rsx! {
             div { class: "panel-empty",
                 "Select or type a formula to see function documentation."
             }
         };
-    };
+    }
 
-    rsx! { FunctionDocsPanel { function } }
+    rsx! { DocsCompletionsPanel { state, formula_input, matches } }
+}
+
+#[component]
+fn DocsCompletionsPanel(
+    mut state: Signal<AppState>,
+    formula_input: String,
+    matches: Vec<FormulaFunction>,
+) -> Element {
+    rsx! {
+        div { class: "function-docs",
+            div { class: "doc-header",
+                div {
+                    div { class: "doc-title", "Completions" }
+                    div { class: "doc-summary", "Possible formulas for {formula_input}" }
+                }
+                div { class: "doc-muted", "{matches.len()} matches" }
+            }
+            div { class: "doc-index completion-doc-index",
+                for function in matches {
+                    button {
+                        class: "doc-card doc-completion-card",
+                        onmousedown: move |event| {
+                            event.prevent_default();
+                            event.stop_propagation();
+                        },
+                        onclick: move |_| {
+                            state.with_mut(|state| state.insert_formula(function));
+                        },
+                        div { class: "doc-card-head",
+                            div { class: "doc-card-title", "{function.name}" }
+                            code { class: "doc-card-signature", "{function.signature}" }
+                        }
+                        div { class: "doc-summary", "{function.summary}" }
+                        div { class: "doc-description", "{function.details}" }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[component]
 fn FunctionDocsPanel(function: FormulaFunction) -> Element {
     let models = models_for_function(function);
+    let related = related_functions_for_function(function);
     let selected_model = use_signal(|| None::<String>);
     let active_model_id = selected_model
         .read()
@@ -128,7 +175,31 @@ fn FunctionDocsPanel(function: FormulaFunction) -> Element {
             div { class: "doc-grid",
                 DocArguments { function }
                 DocModels { selected_model, active_model_id, models }
-                DocNotes { function }
+                div { class: "doc-side-sections",
+                    DocNotes { function }
+                    DocSeeAlso { related }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn DocSeeAlso(related: Vec<FormulaFunction>) -> Element {
+    rsx! {
+        section { class: "doc-section",
+            h3 { "See Also" }
+            if related.is_empty() {
+                div { class: "doc-muted", "No related formulas documented yet." }
+            } else {
+                div { class: "see-also-list",
+                    for function in related {
+                        div { class: "see-also-item",
+                            code { "{function.name}" }
+                            div { class: "doc-description", "{function.summary}" }
+                        }
+                    }
+                }
             }
         }
     }

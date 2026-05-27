@@ -57,6 +57,13 @@ pub enum MathFunction {
     Divide,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FormulaTopic {
+    LlmText,
+    MediaGeneration,
+    Arithmetic,
+}
+
 const GENERATE_IMAGE_ARGUMENTS: &[FormulaArgumentDoc] = &[
     FormulaArgumentDoc {
         name: "prompt",
@@ -628,6 +635,31 @@ pub fn formula_example_for_function(
     }
 }
 
+pub fn related_functions_for_function(function: FormulaFunction) -> Vec<FormulaFunction> {
+    let Some(topic) = formula_topic(function) else {
+        return Vec::new();
+    };
+
+    FORMULA_FUNCTIONS
+        .iter()
+        .copied()
+        .filter(|candidate| candidate.name != function.name)
+        .filter(|candidate| formula_topic(*candidate) == Some(topic))
+        .collect()
+}
+
+fn formula_topic(function: FormulaFunction) -> Option<FormulaTopic> {
+    match function.name {
+        "LLM" | "LLM_LIST_DOWN" | "LLM_LIST_RIGHT" => Some(FormulaTopic::LlmText),
+        "GENERATEIMAGE" | "SEGMENT" | "GENERATEVIDEO" | "CONCATENATEVIDEO" => {
+            Some(FormulaTopic::MediaGeneration)
+        }
+        "SUM" | "PRODUCT" | "AVERAGE" | "MIN" | "MAX" | "ADD" | "SUBTRACT" | "MULTIPLY"
+        | "DIVIDE" => Some(FormulaTopic::Arithmetic),
+        _ => None,
+    }
+}
+
 fn formula_query(input: &str) -> Option<String> {
     let trimmed = input.trim_start();
     let query = trimmed.strip_prefix('=')?;
@@ -801,6 +833,39 @@ mod tests {
         assert_eq!(
             formula_example_for_function(*llm_list_right, Some("google/gemini-2.5-flash")),
             r#"=LLM_LIST_RIGHT(prompt, "google/gemini-2.5-flash", image, system_prompt)"#
+        );
+    }
+
+    #[test]
+    fn related_functions_include_llm_spill_variants() {
+        let llm_function = FORMULA_FUNCTIONS
+            .iter()
+            .find(|function| function.name == "LLM")
+            .unwrap();
+        let related = related_functions_for_function(*llm_function);
+
+        assert!(
+            related
+                .iter()
+                .any(|function| function.name == "LLM_LIST_DOWN")
+        );
+        assert!(
+            related
+                .iter()
+                .any(|function| function.name == "LLM_LIST_RIGHT")
+        );
+
+        let llm_list_down = FORMULA_FUNCTIONS
+            .iter()
+            .find(|function| function.name == "LLM_LIST_DOWN")
+            .unwrap();
+        let related = related_functions_for_function(*llm_list_down);
+
+        assert!(related.iter().any(|function| function.name == "LLM"));
+        assert!(
+            related
+                .iter()
+                .any(|function| function.name == "LLM_LIST_RIGHT")
         );
     }
 }

@@ -667,7 +667,8 @@ input.cell {
 
 .doc-signature,
 .doc-row code,
-.model-heading code {
+.model-heading code,
+.see-also-item code {
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: 12px;
 }
@@ -695,6 +696,10 @@ input.cell {
     gap: 8px;
 }
 
+.completion-doc-index {
+    max-width: 960px;
+}
+
 .doc-card {
     display: grid;
     gap: 4px;
@@ -702,6 +707,19 @@ input.cell {
     border: 1px solid #e0e0e0;
     border-radius: 6px;
     background: #fff;
+}
+
+.doc-completion-card {
+    width: 100%;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.doc-completion-card:hover {
+    border-color: #c7d2fe;
+    background: #f8fbff;
 }
 
 .doc-card-head {
@@ -741,6 +759,28 @@ input.cell {
 .model-list {
     display: grid;
     gap: 8px;
+}
+
+.doc-side-sections,
+.see-also-list {
+    display: grid;
+}
+
+.doc-side-sections {
+    gap: 12px;
+}
+
+.see-also-list {
+    gap: 8px;
+}
+
+.see-also-item {
+    display: grid;
+    gap: 4px;
+    padding: 8px;
+    border: 1px solid #e0e0e0;
+    border-radius: 4px;
+    background: #fff;
 }
 
 .doc-row,
