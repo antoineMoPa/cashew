@@ -21,6 +21,7 @@ Easy
  - TRANSCRIBE
  - COMBINE -> combine audio and video
  - OVERLAY -> overlay images, video, etc
+ - VECTORIZEIMAGE -> raster to vector
 
 
 ## Features

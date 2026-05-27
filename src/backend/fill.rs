@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use super::document::{Sheet, column_name};
 
 const NUMBER_SERIES_STEP_TOLERANCE: f64 = 0.000_000_001;
@@ -10,7 +12,7 @@ pub struct CellReferenceParts {
     pub col_absolute: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FillRange {
     pub start_row: usize,
     pub start_col: usize,

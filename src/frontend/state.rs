@@ -17,8 +17,9 @@ use crate::backend::cache::{
 use crate::backend::document::{CashewDocument, CellValue, cell_key, column_name};
 use crate::backend::fill::FillRange;
 use crate::backend::formula_implementations::{
-    concatenate_video_inputs_for_sheet, generate_image_request_for_sheet,
-    generate_video_request_for_sheet, llm_request_for_sheet, segment_request_for_sheet,
+    LlmOutputMode, LlmRequest, concatenate_video_inputs_for_sheet,
+    generate_image_request_for_sheet, generate_video_request_for_sheet, llm_request_for_sheet,
+    segment_request_for_sheet,
 };
 use crate::backend::formulas::FormulaFunction;
 use crate::backend::providers::fal_image::{FalImageClient, GenerateImageRequest};
@@ -230,21 +231,21 @@ impl AppState {
         self.completion_index = 0;
     }
 
-    pub(crate) async fn run_llm_for_cell(
+    pub(crate) async fn run_openrouter_for_cell(
         mut state: dioxus::prelude::Signal<Self>,
         row: usize,
         col: usize,
         input: String,
         cache_key: String,
-        request: OpenRouterRequest,
+        request: LlmRequest,
         network_call_id: u64,
     ) {
-        let result = run_openrouter_request(&request).await;
+        let result = run_openrouter_request(&request.request).await;
 
         state.with_mut(|state| {
             let error_message = result.as_ref().err().map(ToString::to_string);
             state.finish_network_call(network_call_id, result.is_ok(), error_message);
-            state.finish_llm_for_cell(row, col, input, cache_key, result);
+            state.finish_openrouter_for_cell(row, col, input, cache_key, request, result);
         });
     }
 
@@ -345,7 +346,7 @@ impl AppState {
         &mut self,
         row: usize,
         col: usize,
-    ) -> Option<(usize, usize, String, String, OpenRouterRequest, u64)> {
+    ) -> Option<(usize, usize, String, String, LlmRequest, u64)> {
         let sheet = self.document.active_sheet()?;
         let cell = sheet.cell(row, col)?;
         if !llm_cell_is_runnable(&cell.value) {
@@ -354,19 +355,23 @@ impl AppState {
 
         let input = cell.input.clone();
         let request = llm_request_for_sheet(&input, sheet).ok().flatten()?;
-        let cache_key = llm_cache_key(&input, &request);
+        let cache_key = llm_cache_key(&input, &request.request);
 
         if let Some(cached) = cached_text(&self.document, &cache_key) {
-            if let Some(sheet) = self.document.active_sheet_mut() {
-                sheet.set_cell_value_with_cache(
-                    row,
-                    col,
-                    input,
-                    CellValue::Cached(cached),
-                    Some(cache_key),
-                );
-            }
-            self.status = format!("Used cached LLM result for {}", cell_key(row, col));
+            self.document.finish_openrouter_for_cell(
+                row,
+                col,
+                input,
+                cache_key,
+                request.clone(),
+                Ok(cached),
+            );
+            self.dirty = true;
+            self.status = format!(
+                "Used cached {} result for {}",
+                request.function_name,
+                cell_key(row, col)
+            );
             return None;
         }
 
@@ -376,13 +381,17 @@ impl AppState {
                 col,
                 input.clone(),
                 CellValue::FormulaPending {
-                    message: "Running LLM...".to_string(),
+                    message: openrouter_pending_message(request.output_mode).to_string(),
                 },
                 Some(cache_key.clone()),
             );
         }
-        self.status = format!("Running LLM for {}", cell_key(row, col));
-        let network_call_id = self.push_network_call(NetworkCallRecord::for_llm(
+        self.status = format!(
+            "Running {} for {}",
+            request.function_name,
+            cell_key(row, col)
+        );
+        let network_call_id = self.push_network_call(NetworkCallRecord::for_openrouter(
             self.next_network_call_id,
             row,
             col,
@@ -676,48 +685,31 @@ impl AppState {
         Some((row, col, input, cache_key, video_inputs))
     }
 
-    pub(crate) fn finish_llm_for_cell(
+    pub(crate) fn finish_openrouter_for_cell(
         &mut self,
         row: usize,
         col: usize,
         input: String,
         cache_key: String,
+        request: LlmRequest,
         result: anyhow::Result<String>,
     ) {
-        let value = match result {
-            Ok(output) => {
-                self.document.cache.insert(
-                    cache_key.clone(),
-                    CacheEntry {
-                        key: cache_key.clone(),
-                        status: CacheStatus::Ready,
-                        value: CachedValue::Text(output.clone()),
-                    },
-                );
-                self.status = format!("LLM completed for {}", cell_key(row, col));
-                CellValue::Cached(output)
-            }
-            Err(error) => {
-                self.document.cache.insert(
-                    cache_key.clone(),
-                    CacheEntry {
-                        key: cache_key.clone(),
-                        status: CacheStatus::Failed {
-                            message: error.to_string(),
-                        },
-                        value: CachedValue::Text(String::new()),
-                    },
-                );
-                self.status = format!("LLM failed for {}", cell_key(row, col));
-                CellValue::Error(error.to_string())
-            }
+        self.status = if result.is_ok() {
+            format!(
+                "{} completed for {}",
+                request.function_name,
+                cell_key(row, col)
+            )
+        } else {
+            format!(
+                "{} failed for {}",
+                request.function_name,
+                cell_key(row, col)
+            )
         };
-
-        if let Some(sheet) = self.document.active_sheet_mut() {
-            sheet.set_cell_value_with_cache(row, col, input, value, Some(cache_key));
-            sheet.recalculate_formulas();
-            self.dirty = true;
-        }
+        self.document
+            .finish_openrouter_for_cell(row, col, input, cache_key, request, result);
+        self.dirty = true;
     }
 
     pub(crate) fn finish_generate_image_for_cell(
@@ -1318,20 +1310,21 @@ impl AppState {
 }
 
 impl NetworkCallRecord {
-    fn for_llm(
+    fn for_openrouter(
         id: u64,
         row: usize,
         col: usize,
         status: NetworkCallStatus,
-        request: &OpenRouterRequest,
+        request: &LlmRequest,
     ) -> Self {
-        let request_body = serde_json::to_value(request).unwrap_or(serde_json::Value::Null);
+        let request_body =
+            serde_json::to_value(&request.request).unwrap_or(serde_json::Value::Null);
         Self {
             id,
             cell: cell_key(row, col),
-            function_name: "LLM".to_string(),
+            function_name: request.function_name.to_string(),
             provider: "fal.openrouter".to_string(),
-            url: request.endpoint().to_string(),
+            url: request.request.endpoint().to_string(),
             status,
             request_body: request_body_without_images(&request_body),
             image_inputs: image_inputs_from_body(&request_body),
@@ -1417,14 +1410,14 @@ impl NetworkCallRecord {
 impl AppState {
     fn start_pending_provider_work(&mut self, work: &ProviderWork) {
         match work {
-            ProviderWork::Llm((row, col, input, cache_key, _, network_call_id)) => {
+            ProviderWork::Llm((row, col, input, cache_key, request, network_call_id)) => {
                 if let Some(sheet) = self.document.active_sheet_mut() {
                     sheet.set_cell_value_with_cache(
                         *row,
                         *col,
                         (*input).clone(),
                         CellValue::FormulaPending {
-                            message: "Running LLM...".to_string(),
+                            message: openrouter_pending_message(request.output_mode).to_string(),
                         },
                         Some((*cache_key).clone()),
                     );
@@ -2049,6 +2042,13 @@ fn cached_media_cell_value(document: &CashewDocument, cache_key: &str) -> Option
     }
 }
 
+fn openrouter_pending_message(mode: LlmOutputMode) -> &'static str {
+    match mode {
+        LlmOutputMode::Text => "Running LLM...",
+        LlmOutputMode::ListDown | LlmOutputMode::ListRight => "Running LLM list...",
+    }
+}
+
 fn llm_cell_is_runnable(value: &CellValue) -> bool {
     match value {
         CellValue::FormulaPending { message } => {
@@ -2212,7 +2212,11 @@ mod tests {
 
         state.finish_network_call(9, false, Some("provider said no".to_string()));
 
-        let record = state.network_calls.iter().find(|record| record.id == 9).unwrap();
+        let record = state
+            .network_calls
+            .iter()
+            .find(|record| record.id == 9)
+            .unwrap();
         assert!(matches!(record.status, NetworkCallStatus::Failed));
         assert_eq!(record.error_message.as_deref(), Some("provider said no"));
     }
@@ -2269,11 +2273,16 @@ mod tests {
 
     #[test]
     fn openrouter_network_record_does_not_include_auth_data() {
-        let request = OpenRouterRequest::new("hello").with_image_urls(vec![
-            "https://example.com/image.png".to_string(),
-        ]);
+        let request = OpenRouterRequest::new("hello")
+            .with_image_urls(vec!["https://example.com/image.png".to_string()]);
 
-        let record = NetworkCallRecord::for_llm(3, 0, 0, NetworkCallStatus::Running, &request);
+        let llm_request = LlmRequest {
+            function_name: "LLM",
+            output_mode: LlmOutputMode::Text,
+            request,
+        };
+        let record =
+            NetworkCallRecord::for_openrouter(3, 0, 0, NetworkCallStatus::Running, &llm_request);
         let body = serde_json::to_string(&record.request_body).unwrap();
 
         assert_eq!(

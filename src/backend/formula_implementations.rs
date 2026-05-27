@@ -1,16 +1,16 @@
 use super::{
     document::{CellValue, Sheet},
     fill::parse_cell_reference_parts,
-    formulas::{FORMULA_FUNCTIONS, FormulaImplementation, MathFunction},
+    formulas::{FormulaImplementation, MathFunction, FORMULA_FUNCTIONS},
     providers::{
         fal_image::{
-            DEFAULT_MODEL as DEFAULT_IMAGE_MODEL, GenerateImageRequest, parse_image_quality,
+            parse_image_quality, GenerateImageRequest, DEFAULT_MODEL as DEFAULT_IMAGE_MODEL,
         },
         fal_segment::{
             SegmentBoxPrompt, SegmentImageRequest, SegmentOutputFormat, SegmentPointPrompt,
         },
-        fal_video::{GenerateVideoRequest, video_model_id_is_supported},
-        openrouter::{DEFAULT_MODEL, OpenRouterRequest},
+        fal_video::{video_model_id_is_supported, GenerateVideoRequest},
+        openrouter::{OpenRouterRequest, DEFAULT_MODEL},
     },
 };
 use serde_json::Value;
@@ -26,6 +26,26 @@ pub enum FormulaValue {
     },
     Pending(String),
     Empty,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmOutputMode {
+    Text,
+    ListDown,
+    ListRight,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LlmRequest {
+    pub function_name: &'static str,
+    pub output_mode: LlmOutputMode,
+    pub request: OpenRouterRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LlmFormulaOutput {
+    Text(String),
+    List(Vec<String>),
 }
 
 #[cfg(test)]
@@ -98,10 +118,11 @@ fn evaluate_formula_with_sheet(input: &str, sheet: Option<&Sheet>) -> Result<For
         .map(FormulaValue::Number)
 }
 
-pub fn llm_request_for_sheet(
-    input: &str,
-    sheet: &Sheet,
-) -> Result<Option<OpenRouterRequest>, String> {
+pub fn llm_request_for_sheet(input: &str, sheet: &Sheet) -> Result<Option<LlmRequest>, String> {
+    parse_llm_request(input, sheet)
+}
+
+fn parse_llm_request(input: &str, sheet: &Sheet) -> Result<Option<LlmRequest>, String> {
     let expression = input
         .trim_start()
         .strip_prefix('=')
@@ -111,9 +132,9 @@ pub fn llm_request_for_sheet(
         return Ok(None);
     };
 
-    if !name.eq_ignore_ascii_case("LLM") {
+    let Some(output_mode) = llm_output_mode_for_name(&name) else {
         return Ok(None);
-    }
+    };
 
     let args = split_formula_arguments(args)?;
     if args.is_empty() {
@@ -145,11 +166,55 @@ pub fn llm_request_for_sheet(
     let mut request = OpenRouterRequest::new(prompt)
         .with_model(model)
         .with_image_urls(image_urls);
-    if let Some(system_prompt) = system_prompt {
+    if let Some(system_prompt) = llm_system_prompt_for_mode(output_mode, system_prompt) {
         request = request.with_system_prompt(system_prompt);
     }
 
-    Ok(Some(request))
+    Ok(Some(LlmRequest {
+        function_name: llm_function_name_for_mode(output_mode),
+        output_mode,
+        request,
+    }))
+}
+
+fn llm_output_mode_for_name(name: &str) -> Option<LlmOutputMode> {
+    if name.eq_ignore_ascii_case("LLM") {
+        return Some(LlmOutputMode::Text);
+    }
+
+    if name.eq_ignore_ascii_case("LLM_LIST_DOWN") {
+        return Some(LlmOutputMode::ListDown);
+    }
+
+    if name.eq_ignore_ascii_case("LLM_LIST_RIGHT") {
+        return Some(LlmOutputMode::ListRight);
+    }
+
+    None
+}
+
+fn llm_function_name_for_mode(mode: LlmOutputMode) -> &'static str {
+    match mode {
+        LlmOutputMode::Text => "LLM",
+        LlmOutputMode::ListDown => "LLM_LIST_DOWN",
+        LlmOutputMode::ListRight => "LLM_LIST_RIGHT",
+    }
+}
+
+fn llm_system_prompt_for_mode(mode: LlmOutputMode, user_prompt: Option<String>) -> Option<String> {
+    let instructions = match mode {
+        LlmOutputMode::Text => return user_prompt,
+        LlmOutputMode::ListDown | LlmOutputMode::ListRight => {
+            "Return valid JSON as a one-dimensional array of strings. Expected format: [\"first item\", \"second item\"]. Do not return comma-separated quoted strings. Do not use markdown fences, bullets, or numbering."
+        }
+    };
+
+    match user_prompt {
+        Some(user_prompt) if !user_prompt.trim().is_empty() => {
+            Some(format!("{user_prompt}\n\n{instructions}"))
+        }
+        Some(_) | None => Some(instructions.to_string()),
+    }
 }
 
 fn split_llm_extra_arguments(args: &[String]) -> Result<(Vec<String>, Option<String>), String> {
@@ -170,9 +235,7 @@ fn split_llm_extra_arguments(args: &[String]) -> Result<(Vec<String>, Option<Str
             return Ok((args.to_vec(), None));
         }
 
-        return Err(
-            "LLM image inputs must come before the optional system_prompt".to_string(),
-        );
+        return Err("LLM image inputs must come before the optional system_prompt".to_string());
     }
 
     let image_urls = args[..args.len() - 1]
@@ -181,8 +244,10 @@ fn split_llm_extra_arguments(args: &[String]) -> Result<(Vec<String>, Option<Str
             if llm_image_input(arg) {
                 Ok(arg.clone())
             } else {
-                Err("LLM image inputs must be URLs, data URIs, or cells that resolve to one"
-                    .to_string())
+                Err(
+                    "LLM image inputs must be URLs, data URIs, or cells that resolve to one"
+                        .to_string(),
+                )
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -195,6 +260,83 @@ fn llm_image_input(value: &str) -> bool {
     trimmed.starts_with("data:")
         || trimmed.starts_with("https://")
         || trimmed.starts_with("http://")
+}
+
+pub fn parse_llm_output(mode: LlmOutputMode, output: &str) -> Result<LlmFormulaOutput, String> {
+    match mode {
+        LlmOutputMode::Text => Ok(LlmFormulaOutput::Text(output.to_string())),
+        LlmOutputMode::ListDown | LlmOutputMode::ListRight => {
+            parse_llm_list_output(output).map(LlmFormulaOutput::List)
+        }
+    }
+}
+
+fn parse_llm_list_output(output: &str) -> Result<Vec<String>, String> {
+    let trimmed = strip_markdown_code_fence(output).trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if let Ok(values) = serde_json::from_str::<Vec<String>>(trimmed) {
+        return Ok(values
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect());
+    }
+
+    Ok(trimmed
+        .lines()
+        .map(llm_list_item_from_line)
+        .filter(|value| !value.is_empty())
+        .collect())
+}
+
+fn llm_list_item_from_line(line: &str) -> String {
+    let trimmed = line.trim();
+    let trimmed = trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+        .or_else(|| trimmed.strip_prefix("• "))
+        .or_else(|| strip_numbered_prefix(trimmed))
+        .unwrap_or(trimmed);
+
+    trimmed.trim().to_string()
+}
+
+fn strip_numbered_prefix(value: &str) -> Option<&str> {
+    let mut digits = 0usize;
+    for character in value.chars() {
+        if character.is_ascii_digit() {
+            digits += 1;
+        } else {
+            break;
+        }
+    }
+
+    if digits == 0 {
+        return None;
+    }
+
+    let remainder = &value[digits..];
+    remainder
+        .strip_prefix(". ")
+        .or_else(|| remainder.strip_prefix(") "))
+}
+
+fn strip_markdown_code_fence(output: &str) -> &str {
+    let trimmed = output.trim();
+    let Some(without_opening) = trimmed.strip_prefix("```") else {
+        return trimmed;
+    };
+    let without_language = without_opening
+        .split_once('\n')
+        .map(|(_, rest)| rest)
+        .unwrap_or(without_opening);
+    without_language
+        .strip_suffix("```")
+        .unwrap_or(without_language)
+        .trim()
 }
 
 pub fn generate_image_request_for_sheet(
@@ -722,9 +864,8 @@ fn json_value_to_text(value: &Value) -> Result<String, String> {
         Value::Bool(value) => Ok(value.to_string()),
         Value::Number(value) => Ok(value.to_string()),
         Value::String(value) => Ok(value.clone()),
-        Value::Array(_) | Value::Object(_) => {
-            serde_json::to_string(value).map_err(|error| format!("Could not serialize JSON: {error}"))
-        }
+        Value::Array(_) | Value::Object(_) => serde_json::to_string(value)
+            .map_err(|error| format!("Could not serialize JSON: {error}")),
     }
 }
 
@@ -1038,6 +1179,18 @@ mod tests {
             ))
         );
         assert_eq!(
+            evaluate_formula("=LLM_LIST_DOWN(A1, A2)"),
+            Ok(FormulaValue::Pending(
+                "fal.openrouter request is ready to run".to_string()
+            ))
+        );
+        assert_eq!(
+            evaluate_formula("=LLM_LIST_RIGHT(A1, A2)"),
+            Ok(FormulaValue::Pending(
+                "fal.openrouter request is ready to run".to_string()
+            ))
+        );
+        assert_eq!(
             evaluate_formula("=GENERATEVIDEO(A1, A2)"),
             Ok(FormulaValue::Pending(
                 "fal.video request is ready to run".to_string()
@@ -1101,7 +1254,8 @@ mod tests {
     #[test]
     fn extracts_json_values_from_literals_and_cell_refs() {
         let mut sheet = Sheet::new("JSON", 2, 2);
-        let json = r#"{"user":{"name":"Ada","active":true,"details":{"age":37}},"tags":["ai","art"]}"#;
+        let json =
+            r#"{"user":{"name":"Ada","active":true,"details":{"age":37}},"tags":["ai","art"]}"#;
         sheet.set_cell_value_with_cache(
             0,
             0,
@@ -1127,7 +1281,11 @@ mod tests {
     #[test]
     fn extracts_json_arrays_and_returns_empty_text_for_missing_paths() {
         let mut sheet = Sheet::new("JSON Edge", 2, 2);
-        sheet.set_cell_input(0, 0, r#"{"items":[[{"name":"first"}],[{"name":"second"}]],"empty":null}"#.to_string());
+        sheet.set_cell_input(
+            0,
+            0,
+            r#"{"items":[[{"name":"first"}],[{"name":"second"}]],"empty":null}"#.to_string(),
+        );
 
         assert_eq!(
             evaluate_formula_for_sheet(r#"=JSONEXTRACT(A1, "$.items[0][0].name")"#, &sheet),
@@ -1171,10 +1329,15 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        assert_eq!(request.prompt, "Say hi");
-        assert_eq!(request.model, "google/gemini-2.5-flash");
-        assert_eq!(request.system_prompt.as_deref(), Some("Only answer in one sentence"));
-        assert!(request.image_urls.is_empty());
+        assert_eq!(request.function_name, "LLM");
+        assert_eq!(request.output_mode, LlmOutputMode::Text);
+        assert_eq!(request.request.prompt, "Say hi");
+        assert_eq!(request.request.model, "google/gemini-2.5-flash");
+        assert_eq!(
+            request.request.system_prompt.as_deref(),
+            Some("Only answer in one sentence")
+        );
+        assert!(request.request.image_urls.is_empty());
     }
 
     #[test]
@@ -1188,11 +1351,74 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(request.prompt, "Describe this image");
-        assert_eq!(request.model, DEFAULT_MODEL);
-        assert_eq!(request.image_urls, vec!["https://example.com/image.png"]);
-        assert_eq!(request.system_prompt.as_deref(), Some("Keep it brief"));
-        assert_eq!(request.endpoint(), crate::backend::providers::openrouter::VISION_ENDPOINT);
+        assert_eq!(request.function_name, "LLM");
+        assert_eq!(request.output_mode, LlmOutputMode::Text);
+        assert_eq!(request.request.prompt, "Describe this image");
+        assert_eq!(request.request.model, DEFAULT_MODEL);
+        assert_eq!(
+            request.request.image_urls,
+            vec!["https://example.com/image.png"]
+        );
+        assert_eq!(
+            request.request.system_prompt.as_deref(),
+            Some("Keep it brief")
+        );
+        assert_eq!(
+            request.request.endpoint(),
+            crate::backend::providers::openrouter::VISION_ENDPOINT
+        );
+    }
+
+    #[test]
+    fn builds_llm_spill_request_from_literals_and_cell_refs() {
+        let mut sheet = Sheet::new("LLM Spill", 2, 3);
+        sheet.set_cell_input(0, 0, "List the objects".to_string());
+        sheet.set_cell_input(0, 1, "https://example.com/image.png".to_string());
+
+        let request = llm_request_for_sheet(r#"=LLM_LIST_RIGHT(A1, "", B1)"#, &sheet)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(request.function_name, "LLM_LIST_RIGHT");
+        assert_eq!(request.output_mode, LlmOutputMode::ListRight);
+        assert_eq!(
+            request.request.endpoint(),
+            crate::backend::providers::openrouter::VISION_ENDPOINT
+        );
+        assert!(request
+            .request
+            .system_prompt
+            .as_deref()
+            .unwrap()
+            .contains("one-dimensional array of strings"));
+        assert!(request
+            .request
+            .system_prompt
+            .as_deref()
+            .unwrap()
+            .contains(r#"Expected format: ["first item", "second item"]"#));
+        assert!(request
+            .request
+            .system_prompt
+            .as_deref()
+            .unwrap()
+            .contains("Do not return comma-separated quoted strings"));
+    }
+
+    #[test]
+    fn parses_llm_list_output_from_json_and_bullets() {
+        assert_eq!(
+            parse_llm_output(LlmOutputMode::ListDown, r#"["cat","chair"]"#).unwrap(),
+            LlmFormulaOutput::List(vec!["cat".to_string(), "chair".to_string()])
+        );
+        assert_eq!(
+            parse_llm_output(LlmOutputMode::ListDown, "- cat\n2. chair\n\n* lamp").unwrap(),
+            LlmFormulaOutput::List(vec![
+                "cat".to_string(),
+                "chair".to_string(),
+                "lamp".to_string(),
+            ])
+        );
     }
 
     #[test]

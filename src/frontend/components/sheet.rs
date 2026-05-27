@@ -2,20 +2,14 @@ use dioxus::prelude::*;
 
 use crate::backend::cache::{CacheStatus, CachedValue, MediaType};
 use crate::backend::document::{Cell, CellValue, column_name};
+use crate::backend::formula_implementations::LlmRequest;
 use crate::backend::formulas::{function_for_formula_input, matching_functions};
 
 use super::super::state::{
     AppState, CellInteractionMode, MIN_VISIBLE_COLS, MIN_VISIBLE_ROWS, ResizeDrag, ResizeKind,
 };
 
-type LlmWork = (
-    usize,
-    usize,
-    String,
-    String,
-    crate::backend::providers::openrouter::OpenRouterRequest,
-    u64,
-);
+type LlmWork = (usize, usize, String, String, LlmRequest, u64);
 
 type GenerateImageWork = (
     usize,
@@ -855,7 +849,7 @@ pub(crate) fn spawn_provider_work(state: Signal<AppState>, work: Option<Provider
     match work {
         Some(ProviderWork::Llm((row, col, input, cache_key, request, network_call_id))) => {
             spawn(async move {
-                AppState::run_llm_for_cell(
+                AppState::run_openrouter_for_cell(
                     state,
                     row,
                     col,

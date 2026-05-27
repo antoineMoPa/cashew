@@ -4,10 +4,11 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    cache::CacheEntry,
+    cache::{CacheEntry, CacheStatus, CachedValue},
     fill::{self, FillRange},
     formula_implementations::{
-        FormulaValue, evaluate_formula_for_sheet, format_number, parse_cell_reference,
+        FormulaValue, LlmFormulaOutput, LlmRequest, evaluate_formula_for_sheet, format_number,
+        parse_cell_reference, parse_llm_output,
     },
 };
 
@@ -36,6 +37,8 @@ pub struct Cell {
     pub input: String,
     pub value: CellValue,
     pub cache_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spill_range: Option<FillRange>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -77,6 +80,77 @@ impl CashewDocument {
 
     pub fn active_sheet_mut(&mut self) -> Option<&mut Sheet> {
         self.sheets.first_mut()
+    }
+
+    pub(crate) fn finish_openrouter_for_cell(
+        &mut self,
+        row: usize,
+        col: usize,
+        input: String,
+        cache_key: String,
+        request: LlmRequest,
+        result: anyhow::Result<String>,
+    ) {
+        match result {
+            Ok(output) => {
+                self.cache.insert(
+                    cache_key.clone(),
+                    CacheEntry {
+                        key: cache_key.clone(),
+                        status: CacheStatus::Ready,
+                        value: CachedValue::Text(output.clone()),
+                    },
+                );
+
+                if let Some(sheet) = self.active_sheet_mut() {
+                    match parse_llm_output(request.output_mode, &output) {
+                        Ok(parsed) => {
+                            sheet.apply_openrouter_output(
+                                row,
+                                col,
+                                input,
+                                Some(cache_key),
+                                &request,
+                                parsed,
+                            );
+                        }
+                        Err(error) => {
+                            sheet.set_cell_value_with_cache(
+                                row,
+                                col,
+                                input,
+                                CellValue::Error(error),
+                                Some(cache_key),
+                            );
+                        }
+                    }
+                    sheet.recalculate_formulas();
+                }
+            }
+            Err(error) => {
+                self.cache.insert(
+                    cache_key.clone(),
+                    CacheEntry {
+                        key: cache_key.clone(),
+                        status: CacheStatus::Failed {
+                            message: error.to_string(),
+                        },
+                        value: CachedValue::Text(String::new()),
+                    },
+                );
+
+                if let Some(sheet) = self.active_sheet_mut() {
+                    sheet.set_cell_value_with_cache(
+                        row,
+                        col,
+                        input,
+                        CellValue::Error(error.to_string()),
+                        Some(cache_key),
+                    );
+                    sheet.recalculate_formulas();
+                }
+            }
+        }
     }
 }
 
@@ -153,6 +227,19 @@ impl Sheet {
         value: CellValue,
         cache_key: Option<String>,
     ) {
+        self.set_cell_value_with_cache_and_spill_range(row, col, input, value, cache_key, None);
+    }
+
+    pub fn set_cell_value_with_cache_and_spill_range(
+        &mut self,
+        row: usize,
+        col: usize,
+        input: String,
+        value: CellValue,
+        cache_key: Option<String>,
+        spill_range: Option<FillRange>,
+    ) {
+        self.clear_spill_range(row, col);
         self.ensure_size(row + 1, col + 1);
         self.cells.insert(
             cell_key(row, col),
@@ -160,8 +247,28 @@ impl Sheet {
                 input,
                 value,
                 cache_key,
+                spill_range,
             },
         );
+    }
+
+    pub(crate) fn apply_openrouter_output(
+        &mut self,
+        row: usize,
+        col: usize,
+        input: String,
+        cache_key: Option<String>,
+        request: &LlmRequest,
+        output: LlmFormulaOutput,
+    ) {
+        match output {
+            LlmFormulaOutput::Text(value) => {
+                self.set_cell_value_with_cache(row, col, input, CellValue::Cached(value), cache_key);
+            }
+            LlmFormulaOutput::List(items) => {
+                self.write_llm_list_output(row, col, input, cache_key, items, request);
+            }
+        }
     }
 
     pub fn cell(&self, row: usize, col: usize) -> Option<&Cell> {
@@ -203,6 +310,7 @@ impl Sheet {
         col: usize,
         input: String,
     ) {
+        self.clear_spill_range(row, col);
         let (value, cache_key) = if input.trim().is_empty() {
             (CellValue::Empty, None)
         } else if input.trim_start().starts_with('=') {
@@ -217,8 +325,123 @@ impl Sheet {
                 input,
                 value,
                 cache_key,
+                spill_range: None,
             },
         );
+    }
+
+    fn clear_spill_range(&mut self, row: usize, col: usize) {
+        let current_key = cell_key(row, col);
+        if let Some(spill_range) = self
+            .cells
+            .get(&current_key)
+            .and_then(|cell| cell.spill_range)
+        {
+            self.clear_spill_range_with_range(spill_range, &[current_key.as_str()]);
+            return;
+        }
+
+        let Some((anchor_key, spill_range)) = self
+            .cells
+            .iter()
+            .find_map(|(key, cell)| {
+                cell.spill_range
+                    .filter(|spill_range| spill_range.contains(row, col))
+                    .map(|spill_range| (key.clone(), spill_range))
+            })
+        else {
+            return;
+        };
+
+        self.clear_spill_range_with_range(spill_range, &[anchor_key.as_str(), current_key.as_str()]);
+        if let Some(anchor_cell) = self.cells.get_mut(&anchor_key) {
+            anchor_cell.spill_range = None;
+        }
+    }
+
+    fn clear_spill_range_with_range(&mut self, spill_range: FillRange, preserved_keys: &[&str]) {
+        for spill_row in spill_range.start_row..=spill_range.end_row {
+            for spill_col in spill_range.start_col..=spill_range.end_col {
+                let key = cell_key(spill_row, spill_col);
+                if !preserved_keys.contains(&key.as_str()) {
+                    self.cells.remove(&key);
+                }
+            }
+        }
+    }
+
+    fn write_llm_list_output(
+        &mut self,
+        row: usize,
+        col: usize,
+        input: String,
+        cache_key: Option<String>,
+        items: Vec<String>,
+        request: &LlmRequest,
+    ) {
+        let spill_range = match request.output_mode {
+            crate::backend::formula_implementations::LlmOutputMode::ListDown => {
+                if items.len() > 1 {
+                    Some(FillRange {
+                        start_row: row,
+                        start_col: col,
+                        end_row: row + items.len() - 1,
+                        end_col: col,
+                    })
+                } else {
+                    None
+                }
+            }
+            crate::backend::formula_implementations::LlmOutputMode::ListRight => {
+                if items.len() > 1 {
+                    Some(FillRange {
+                        start_row: row,
+                        start_col: col,
+                        end_row: row,
+                        end_col: col + items.len() - 1,
+                    })
+                } else {
+                    None
+                }
+            }
+            crate::backend::formula_implementations::LlmOutputMode::Text => None,
+        };
+
+        let anchor_value = items.first().cloned().unwrap_or_default();
+        self.set_cell_value_with_cache_and_spill_range(
+            row,
+            col,
+            input,
+            CellValue::Cached(anchor_value),
+            cache_key,
+            spill_range,
+        );
+
+        match request.output_mode {
+            crate::backend::formula_implementations::LlmOutputMode::ListDown => {
+                for (offset, value) in items.into_iter().enumerate().skip(1) {
+                    self.set_cell_value_with_cache(
+                        row + offset,
+                        col,
+                        String::new(),
+                        CellValue::Text(value),
+                        None,
+                    );
+                }
+            }
+            crate::backend::formula_implementations::LlmOutputMode::ListRight => {
+                for (offset, value) in items.into_iter().enumerate().skip(1) {
+                    self.set_cell_value_with_cache(
+                        row,
+                        col + offset,
+                        String::new(),
+                        CellValue::Text(value),
+                        None,
+                    );
+                }
+            }
+            crate::backend::formula_implementations::LlmOutputMode::Text => {}
+        }
     }
 }
 
@@ -350,6 +573,111 @@ mod tests {
                 .map(|cell| (&cell.value, cell.cache_key.as_deref())),
             Some((&CellValue::Cached("cached".to_string()), Some("cache-key")))
         );
+    }
+
+    #[test]
+    fn spill_ranges_are_overwritten_when_the_anchor_changes() {
+        let mut sheet = Sheet::new("Spill", 1, 4);
+        let first_range = FillRange {
+            start_row: 0,
+            start_col: 0,
+            end_row: 0,
+            end_col: 2,
+        };
+        sheet.set_cell_value_with_cache_and_spill_range(
+            0,
+            0,
+            "=LLM_LIST_RIGHT(A1)".to_string(),
+            CellValue::Cached("cat".to_string()),
+            Some("cache-a".to_string()),
+            Some(first_range),
+        );
+        sheet.set_cell_value_with_cache(
+            0,
+            1,
+            String::new(),
+            CellValue::Text("chair".to_string()),
+            None,
+        );
+        sheet.set_cell_value_with_cache(
+            0,
+            2,
+            String::new(),
+            CellValue::Text("lamp".to_string()),
+            None,
+        );
+
+        let second_range = FillRange {
+            start_row: 0,
+            start_col: 0,
+            end_row: 0,
+            end_col: 1,
+        };
+        sheet.set_cell_value_with_cache_and_spill_range(
+            0,
+            0,
+            "=LLM_LIST_RIGHT(A1)".to_string(),
+            CellValue::Cached("dog".to_string()),
+            Some("cache-b".to_string()),
+            Some(second_range),
+        );
+        sheet.set_cell_value_with_cache(
+            0,
+            1,
+            String::new(),
+            CellValue::Text("bone".to_string()),
+            None,
+        );
+
+        assert_eq!(
+            sheet.cell(0, 2).map(|cell| &cell.value),
+            Some(&CellValue::Text("lamp".to_string()))
+        );
+        assert_eq!(
+            sheet.cell(0, 0).map(|cell| (&cell.value, cell.spill_range)),
+            Some((&CellValue::Cached("dog".to_string()), None))
+        );
+    }
+
+    #[test]
+    fn editing_a_spilled_child_clears_the_original_anchor_range() {
+        let mut sheet = Sheet::new("Spill", 1, 4);
+        let spill_range = FillRange {
+            start_row: 0,
+            start_col: 0,
+            end_row: 0,
+            end_col: 2,
+        };
+        sheet.set_cell_value_with_cache_and_spill_range(
+            0,
+            0,
+            "=LLM_LIST_RIGHT(A1)".to_string(),
+            CellValue::Cached("cat".to_string()),
+            Some("cache-a".to_string()),
+            Some(spill_range),
+        );
+        sheet.set_cell_value_with_cache(0, 1, String::new(), CellValue::Text("chair".to_string()), None);
+
+        assert_eq!(sheet.cell(0, 0).and_then(|cell| cell.spill_range), None);
+        assert_eq!(
+            sheet.cell(0, 1).map(|cell| &cell.value),
+            Some(&CellValue::Text("chair".to_string()))
+        );
+        assert_eq!(sheet.cell(0, 2), None);
+
+        sheet.set_cell_value_with_cache(
+            0,
+            0,
+            "=LLM_LIST_RIGHT(A1)".to_string(),
+            CellValue::Cached("dog".to_string()),
+            Some("cache-b".to_string()),
+        );
+
+        assert_eq!(
+            sheet.cell(0, 1).map(|cell| &cell.value),
+            Some(&CellValue::Text("chair".to_string()))
+        );
+        assert_eq!(sheet.cell(0, 0).and_then(|cell| cell.spill_range), None);
     }
 
     #[test]

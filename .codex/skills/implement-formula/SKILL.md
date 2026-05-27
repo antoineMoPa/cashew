@@ -1,6 +1,6 @@
 ---
 name: implement-formula
-description: Implement a new Cashew spreadsheet formula in this repo. Use when Codex needs to pick the next roadmap formula, add backend parsing/evaluation and formula docs, delegate implementation to a gpt-5.4-mini sub-agent, delegate code review to a gpt-5.4 medium sub-agent, run tests, and remove the completed roadmap item.
+description: Implement a new Cashew spreadsheet formula in this repo. Use when Codex needs to pick the next roadmap formula, add backend parsing/evaluation and formula docs, delegate implementation to a gpt-5.4-mini sub-agent, run thermonuclearcodequalityreview on the resulting diff, run tests, and remove the completed roadmap item.
 ---
 
 # Implement Formula
@@ -45,13 +45,9 @@ Implementation scope should usually include:
 
 Give the worker a concrete formula name and acceptance criteria. Require it to list changed files in its final answer.
 
-### Review agent
+### Review step
 
-After implementation is ready, spawn one fresh review agent with:
-- model: `gpt-5.4`
-- reasoning effort: `medium`
-
-Ask it to review the resulting diff for bugs, regressions, and missing tests. Keep the prompt generic. Do not feed it your conclusions.
+After implementation is ready, run `thermonuclearcodequalityreview` on the resulting diff. Use it as the review gate for bugs, regressions, and missing tests. Keep the input generic and do not pre-brief it with your own conclusions.
 
 ## Local integration rules
 
@@ -63,7 +59,7 @@ Ask it to review the resulting diff for bugs, regressions, and missing tests. Ke
    - chosen roadmap item
    - files changed
    - test results
-   - review findings and follow-up fixes
+   - `thermonuclearcodequalityreview` findings and follow-up fixes
 
 ## Repo-specific guidance
 

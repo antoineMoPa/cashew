@@ -130,7 +130,7 @@ impl AppState {
         let copied_rows = (range.start_row..=range.end_row)
             .map(|row| {
                 (range.start_col..=range.end_col)
-                    .map(|col| sheet.cell(row, col).cloned())
+                    .map(|col| sheet.cell(row, col).cloned().map(strip_spill_metadata))
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
@@ -282,10 +282,11 @@ impl AppState {
                     sheet.ensure_size(row + 1, col + 1);
                     sheet.cells.insert(
                         cell_key(row, col),
-                        cell.unwrap_or(Cell {
+                        cell.map(strip_spill_metadata).unwrap_or(Cell {
                             input: String::new(),
                             value: CellValue::Empty,
                             cache_key: None,
+                            spill_range: None,
                         }),
                     );
                 }
@@ -342,6 +343,11 @@ fn cell_value_for_copy(document: &CashewDocument, row: usize, col: usize) -> Str
         CellValue::FormulaPending { message } => message.clone(),
         CellValue::Error(error) => format!("#ERROR: {error}"),
     }
+}
+
+fn strip_spill_metadata(mut cell: Cell) -> Cell {
+    cell.spill_range = None;
+    cell
 }
 
 pub(crate) fn range_label(

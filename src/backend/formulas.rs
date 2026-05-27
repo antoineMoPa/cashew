@@ -181,6 +181,12 @@ const LLM_MODELS: &[FormulaModelDoc] = &[FormulaModelDoc {
     default: true,
 }];
 
+const LLM_SPILL_NOTES: &[&str] = &[
+    "Cache-first: identical formulas with identical resolved inputs reuse stored results.",
+    "Image inputs are resolved before the provider request is built.",
+    "The response is parsed into cells after the provider returns.",
+];
+
 const GENERATE_VIDEO_ARGUMENTS: &[FormulaArgumentDoc] = &[
     FormulaArgumentDoc {
         name: "prompt",
@@ -346,6 +352,34 @@ pub const FORMULA_FUNCTIONS: &[FormulaFunction] = &[
             "Image inputs must be URLs, data URIs, or cells that resolve to one.",
             "When you provide images, place them before the optional system prompt.",
         ],
+        implementation: FormulaImplementation::ProviderAi {
+            provider: "fal.openrouter",
+        },
+    },
+    FormulaFunction {
+        name: "LLM_LIST_DOWN",
+        signature: "LLM_LIST_DOWN(prompt, model?, image..., system_prompt?)",
+        insert_text: "=LLM_LIST_DOWN(prompt, \"google/gemini-2.5-flash\", image, system_prompt)",
+        runs_without_approval: true,
+        summary: "Generate a vertical list through fal OpenRouter.",
+        details: "Runs through fal endpoint openrouter/router or openrouter/router/vision, then spills the response into a single column.",
+        arguments: LLM_ARGUMENTS,
+        models: LLM_MODELS,
+        notes: LLM_SPILL_NOTES,
+        implementation: FormulaImplementation::ProviderAi {
+            provider: "fal.openrouter",
+        },
+    },
+    FormulaFunction {
+        name: "LLM_LIST_RIGHT",
+        signature: "LLM_LIST_RIGHT(prompt, model?, image..., system_prompt?)",
+        insert_text: "=LLM_LIST_RIGHT(prompt, \"google/gemini-2.5-flash\", image, system_prompt)",
+        runs_without_approval: true,
+        summary: "Generate a horizontal list through fal OpenRouter.",
+        details: "Runs through fal endpoint openrouter/router or openrouter/router/vision, then spills the response into a single row.",
+        arguments: LLM_ARGUMENTS,
+        models: LLM_MODELS,
+        notes: LLM_SPILL_NOTES,
         implementation: FormulaImplementation::ProviderAi {
             provider: "fal.openrouter",
         },
@@ -552,6 +586,10 @@ pub fn models_for_function(function: FormulaFunction) -> Vec<FormulaModelDoc> {
             .clone();
     }
 
+    if matches!(function.name, "LLM" | "LLM_LIST_DOWN" | "LLM_LIST_RIGHT") {
+        return LLM_MODELS.to_vec();
+    }
+
     function.models.to_vec()
 }
 
@@ -580,6 +618,12 @@ pub fn formula_example_for_function(
             format!("=GENERATEVIDEO(prompt, image, \"{model_id}\", 8, \"16:9\")")
         }
         "LLM" => format!("=LLM(prompt, \"{model_id}\", image, system_prompt)"),
+        "LLM_LIST_DOWN" => {
+            format!("=LLM_LIST_DOWN(prompt, \"{model_id}\", image, system_prompt)")
+        }
+        "LLM_LIST_RIGHT" => {
+            format!("=LLM_LIST_RIGHT(prompt, \"{model_id}\", image, system_prompt)")
+        }
         _ => function.insert_text.to_string(),
     }
 }
@@ -687,11 +731,21 @@ mod tests {
             .iter()
             .find(|function| function.name == "LLM")
             .unwrap();
+        let llm_list_down = FORMULA_FUNCTIONS
+            .iter()
+            .find(|function| function.name == "LLM_LIST_DOWN")
+            .unwrap();
+        let llm_list_right = FORMULA_FUNCTIONS
+            .iter()
+            .find(|function| function.name == "LLM_LIST_RIGHT")
+            .unwrap();
 
         assert!(!image_function.runs_without_approval);
         assert!(!video_function.runs_without_approval);
         assert!(!segment_function.runs_without_approval);
         assert!(llm_function.runs_without_approval);
+        assert!(llm_list_down.runs_without_approval);
+        assert!(llm_list_right.runs_without_approval);
     }
 
     #[test]
@@ -731,6 +785,22 @@ mod tests {
         assert_eq!(
             formula_example_for_function(*llm_function, Some("google/gemini-2.5-flash")),
             r#"=LLM(prompt, "google/gemini-2.5-flash", image, system_prompt)"#
+        );
+        let llm_list_down = FORMULA_FUNCTIONS
+            .iter()
+            .find(|function| function.name == "LLM_LIST_DOWN")
+            .unwrap();
+        assert_eq!(
+            formula_example_for_function(*llm_list_down, Some("google/gemini-2.5-flash")),
+            r#"=LLM_LIST_DOWN(prompt, "google/gemini-2.5-flash", image, system_prompt)"#
+        );
+        let llm_list_right = FORMULA_FUNCTIONS
+            .iter()
+            .find(|function| function.name == "LLM_LIST_RIGHT")
+            .unwrap();
+        assert_eq!(
+            formula_example_for_function(*llm_list_right, Some("google/gemini-2.5-flash")),
+            r#"=LLM_LIST_RIGHT(prompt, "google/gemini-2.5-flash", image, system_prompt)"#
         );
     }
 }
