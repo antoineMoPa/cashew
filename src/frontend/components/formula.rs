@@ -6,8 +6,8 @@ use crate::backend::formulas::{FormulaFunction, matching_functions};
 
 use super::super::state::{AppState, NetworkCallStatus, should_show_completions};
 use super::sheet::{
-    accept_highlighted_formula_completion, map_editor_text, queue_or_spawn_provider_work,
-    spawn_provider_work,
+    accept_highlighted_formula_completion, formula_reference_segments, map_editor_text,
+    queue_or_spawn_provider_work, spawn_provider_work, FormulaSegment,
 };
 
 #[component]
@@ -31,6 +31,12 @@ pub(crate) fn FormulaBar(mut state: Signal<AppState>) -> Element {
     let autocomplete_suffix = highlighted_completion
         .and_then(|function| formula_completion_suffix(&formula_input, function))
         .unwrap_or_default();
+    let formula_segments = formula_reference_segments(&formula_input);
+    let formula_input_class = if formula_segments.has_references {
+        "formula-input has-references"
+    } else {
+        "formula-input"
+    };
 
     rsx! {
         section { class: "formula-bar",
@@ -39,11 +45,24 @@ pub(crate) fn FormulaBar(mut state: Signal<AppState>) -> Element {
             div { class: "formula-input-wrap",
                 div {
                     class: "formula-autocomplete",
-                    span { class: "formula-autocomplete-prefix", "{formula_input}" }
+                    if formula_segments.has_references {
+                        for segment in formula_segments.segments {
+                            match segment {
+                                FormulaSegment::Text(text) => rsx! {
+                                    span { class: "formula-reference-text", "{text}" }
+                                },
+                                FormulaSegment::Reference { text, class } => rsx! {
+                                    span { class: "formula-reference-token {class}", "{text}" }
+                                },
+                            }
+                        }
+                    } else {
+                        span { class: "formula-autocomplete-prefix", "{formula_input}" }
+                    }
                     span { class: "formula-autocomplete-suffix", "{autocomplete_suffix}" }
                 }
                 input {
-                    class: "formula-input",
+                    class: "{formula_input_class}",
                     value: "{formula_input}",
                     autocomplete: "off",
                     autocorrect: "off",

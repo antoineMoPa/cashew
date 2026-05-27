@@ -196,6 +196,11 @@ input {
     user-select: text;
 }
 
+.formula-input.has-references {
+    color: transparent;
+    caret-color: #202124;
+}
+
 .formula-autocomplete {
     position: absolute;
     inset: 0;
@@ -216,6 +221,10 @@ input {
 
 .formula-autocomplete-suffix {
     color: #9aa0a6;
+}
+
+.formula-reference-text {
+    color: #202124;
 }
 
 .formula-completions {
@@ -447,6 +456,51 @@ input.cell {
 
 .cell.cached {
     background: #f1f8e9;
+}
+
+.cell.formula-reference-cell {
+    position: relative;
+    z-index: 10;
+}
+
+.cell.formula-reference-cell::after {
+    content: "";
+    position: absolute;
+    inset: 1px;
+    pointer-events: none;
+    border: 2px solid currentColor;
+}
+
+.reference-color-0 {
+    color: #d93025;
+}
+
+.reference-color-1 {
+    color: #188038;
+}
+
+.reference-color-2 {
+    color: #1a73e8;
+}
+
+.reference-color-3 {
+    color: #b06000;
+}
+
+.reference-color-4 {
+    color: #9334e6;
+}
+
+.reference-color-5 {
+    color: #00897b;
+}
+
+.reference-color-6 {
+    color: #c5221f;
+}
+
+.reference-color-7 {
+    color: #5f6368;
 }
 
 .cell.image-cell {

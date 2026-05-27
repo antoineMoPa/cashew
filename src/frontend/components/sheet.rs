@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 
 use crate::backend::cache::{CacheStatus, CachedValue, MediaType};
 use crate::backend::document::{Cell, CellValue, column_name};
+use crate::backend::fill::formula_references;
 use crate::backend::formula_implementations::LlmRequest;
 use crate::backend::formulas::{function_for_formula_input, matching_functions};
 
@@ -9,9 +10,10 @@ use super::super::state::{
     AppState, CellInteractionMode, MIN_VISIBLE_COLS, MIN_VISIBLE_ROWS, ResizeDrag, ResizeKind,
 };
 
-type LlmWork = (usize, usize, String, String, LlmRequest, u64);
+type LlmWork = (usize, usize, usize, String, String, LlmRequest, u64);
 
 type GenerateImageWork = (
+    usize,
     usize,
     usize,
     String,
@@ -23,6 +25,7 @@ type GenerateImageWork = (
 type GenerateVideoWork = (
     usize,
     usize,
+    usize,
     String,
     String,
     crate::backend::providers::fal_video::GenerateVideoRequest,
@@ -32,13 +35,14 @@ type GenerateVideoWork = (
 type SegmentWork = (
     usize,
     usize,
+    usize,
     String,
     String,
     crate::backend::providers::fal_segment::SegmentImageRequest,
     u64,
 );
 
-type ConcatenateVideoWork = (usize, usize, String, String, Vec<String>);
+type ConcatenateVideoWork = (usize, usize, usize, String, String, Vec<String>);
 
 #[derive(Debug, Clone)]
 pub(crate) enum ProviderWork {
@@ -131,6 +135,7 @@ pub(crate) fn SheetView(mut state: Signal<AppState>) -> Element {
     let selected_cell = snapshot.selected_cell;
     let selection_range = snapshot.selection_range();
     let selection_contains_multiple_cells = selection_range.contains_multiple_cells();
+    let formula_reference_cells = formula_reference_cell_classes(&snapshot.formula_input);
     let cell_modes = (0..rows)
         .map(|row| {
             (0..cols)
@@ -189,6 +194,12 @@ pub(crate) fn SheetView(mut state: Signal<AppState>) -> Element {
                             selection_right: selection_range.end_col == col,
                             fill_handle_cell: selection_range.end_row == row
                                 && selection_range.end_col == col,
+                            formula_reference_class: formula_reference_cells
+                                .iter()
+                                .find_map(|(reference_row, reference_col, class)| {
+                                    (*reference_row == row && *reference_col == col)
+                                        .then(|| class.clone())
+                                }),
                         }
                     }
                 }
@@ -266,6 +277,7 @@ fn CellEditor(
     selection_left: bool,
     selection_right: bool,
     fill_handle_cell: bool,
+    formula_reference_class: Option<String>,
 ) -> Element {
     let value = cell_display_value(cell.as_ref(), mode);
     let error_message = cell.as_ref().and_then(|cell| match &cell.value {
@@ -305,8 +317,12 @@ fn CellEditor(
     } else {
         ""
     };
+    let formula_reference_class = formula_reference_class
+        .as_deref()
+        .map(|class| format!(" formula-reference-cell {class}"))
+        .unwrap_or_default();
     let class = format!(
-        "cell{}{}{}{}{}{}{}{}",
+        "cell{}{}{}{}{}{}{}{}{}",
         status_class,
         selected_class,
         selection_class,
@@ -314,7 +330,8 @@ fn CellEditor(
         selection_top_class,
         selection_bottom_class,
         selection_left_class,
-        selection_right_class
+        selection_right_class,
+        formula_reference_class
     );
     let style = format!("width: {}px; height: {}px;", width, height);
     let media_preview = media_preview.filter(|_| mode != CellInteractionMode::FormulaEdit);
@@ -523,6 +540,93 @@ fn CellEditor(
                 ErrorPopover { message: error }
             }
         }
+    }
+}
+
+fn formula_reference_cell_classes(input: &str) -> Vec<(usize, usize, String)> {
+    let mut cells = Vec::new();
+    for reference in formula_references(input) {
+        if cells
+            .iter()
+            .any(|(row, col, _)| *row == reference.row && *col == reference.col)
+        {
+            continue;
+        }
+
+        let class = formula_reference_color_class(cells.len()).to_string();
+        cells.push((reference.row, reference.col, class));
+    }
+
+    cells
+}
+
+pub(crate) fn formula_reference_color_class(index: usize) -> &'static str {
+    match index % 8 {
+        0 => "reference-color-0",
+        1 => "reference-color-1",
+        2 => "reference-color-2",
+        3 => "reference-color-3",
+        4 => "reference-color-4",
+        5 => "reference-color-5",
+        6 => "reference-color-6",
+        _ => "reference-color-7",
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FormulaSegments {
+    pub(crate) has_references: bool,
+    pub(crate) segments: Vec<FormulaSegment>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum FormulaSegment {
+    Text(String),
+    Reference { text: String, class: &'static str },
+}
+
+pub(crate) fn formula_reference_segments(input: &str) -> FormulaSegments {
+    let references = formula_references(input);
+    if references.is_empty() {
+        return FormulaSegments {
+            has_references: false,
+            segments: Vec::new(),
+        };
+    }
+
+    let mut cells = Vec::<(usize, usize)>::new();
+    let mut segments = Vec::new();
+    let mut cursor = 0;
+
+    for reference in references {
+        if cursor < reference.start {
+            segments.push(FormulaSegment::Text(
+                input[cursor..reference.start].to_string(),
+            ));
+        }
+
+        let color_index = cells
+            .iter()
+            .position(|(row, col)| *row == reference.row && *col == reference.col)
+            .unwrap_or_else(|| {
+                cells.push((reference.row, reference.col));
+                cells.len() - 1
+            });
+
+        segments.push(FormulaSegment::Reference {
+            text: reference.text,
+            class: formula_reference_color_class(color_index),
+        });
+        cursor = reference.end;
+    }
+
+    if cursor < input.len() {
+        segments.push(FormulaSegment::Text(input[cursor..].to_string()));
+    }
+
+    FormulaSegments {
+        has_references: true,
+        segments,
     }
 }
 
@@ -847,10 +951,19 @@ pub(crate) fn prepare_provider_work(
 
 pub(crate) fn spawn_provider_work(state: Signal<AppState>, work: Option<ProviderWork>) {
     match work {
-        Some(ProviderWork::Llm((row, col, input, cache_key, request, network_call_id))) => {
+        Some(ProviderWork::Llm((
+            sheet_index,
+            row,
+            col,
+            input,
+            cache_key,
+            request,
+            network_call_id,
+        ))) => {
             spawn(async move {
                 AppState::run_openrouter_for_cell(
                     state,
+                    sheet_index,
                     row,
                     col,
                     input,
@@ -862,6 +975,7 @@ pub(crate) fn spawn_provider_work(state: Signal<AppState>, work: Option<Provider
             });
         }
         Some(ProviderWork::GenerateImage((
+            sheet_index,
             row,
             col,
             input,
@@ -872,6 +986,7 @@ pub(crate) fn spawn_provider_work(state: Signal<AppState>, work: Option<Provider
             spawn(async move {
                 AppState::run_generate_image_for_cell(
                     state,
+                    sheet_index,
                     row,
                     col,
                     input,
@@ -883,6 +998,7 @@ pub(crate) fn spawn_provider_work(state: Signal<AppState>, work: Option<Provider
             });
         }
         Some(ProviderWork::GenerateVideo((
+            sheet_index,
             row,
             col,
             input,
@@ -893,6 +1009,7 @@ pub(crate) fn spawn_provider_work(state: Signal<AppState>, work: Option<Provider
             spawn(async move {
                 AppState::run_generate_video_for_cell(
                     state,
+                    sheet_index,
                     row,
                     col,
                     input,
@@ -903,10 +1020,19 @@ pub(crate) fn spawn_provider_work(state: Signal<AppState>, work: Option<Provider
                 .await;
             });
         }
-        Some(ProviderWork::Segment((row, col, input, cache_key, request, network_call_id))) => {
+        Some(ProviderWork::Segment((
+            sheet_index,
+            row,
+            col,
+            input,
+            cache_key,
+            request,
+            network_call_id,
+        ))) => {
             spawn(async move {
                 AppState::run_segment_for_cell(
                     state,
+                    sheet_index,
                     row,
                     col,
                     input,
@@ -917,10 +1043,18 @@ pub(crate) fn spawn_provider_work(state: Signal<AppState>, work: Option<Provider
                 .await;
             });
         }
-        Some(ProviderWork::ConcatenateVideo((row, col, input, cache_key, video_inputs))) => {
+        Some(ProviderWork::ConcatenateVideo((
+            sheet_index,
+            row,
+            col,
+            input,
+            cache_key,
+            video_inputs,
+        ))) => {
             spawn(async move {
                 AppState::run_concatenate_video_for_cell(
                     state,
+                    sheet_index,
                     row,
                     col,
                     input,

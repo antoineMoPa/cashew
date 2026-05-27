@@ -14,7 +14,7 @@ use super::selection::{CopiedCells, SelectionRange};
 use crate::backend::cache::{
     CacheEntry, CacheStatus, CachedValue, MediaAsset, MediaType, stable_cache_key,
 };
-use crate::backend::document::{CashewDocument, CellValue, cell_key, column_name};
+use crate::backend::document::{CashewDocument, CellValue, Sheet, cell_key, column_name};
 use crate::backend::fill::FillRange;
 use crate::backend::formula_implementations::{
     LlmOutputMode, LlmRequest, concatenate_video_inputs_for_sheet,
@@ -140,7 +140,7 @@ impl AppState {
         let formula_input = cell_input(&document, 0, 0);
         let (settings_fal_key, settings_path, settings_status) = load_settings_for_ui();
 
-        Self {
+        let mut state = Self {
             document,
             file_path,
             file_menu_open: false,
@@ -169,7 +169,9 @@ impl AppState {
             pending_provider_calls: Vec::new(),
             copied_cells: None,
             next_network_call_id: 1,
-        }
+        };
+        state.rebuild_pending_provider_calls_from_document();
+        state
     }
 
     pub(crate) fn set_selected_cell(&mut self, row: usize, col: usize) {
@@ -233,6 +235,7 @@ impl AppState {
 
     pub(crate) async fn run_openrouter_for_cell(
         mut state: dioxus::prelude::Signal<Self>,
+        sheet_index: usize,
         row: usize,
         col: usize,
         input: String,
@@ -245,12 +248,21 @@ impl AppState {
         state.with_mut(|state| {
             let error_message = result.as_ref().err().map(ToString::to_string);
             state.finish_network_call(network_call_id, result.is_ok(), error_message);
-            state.finish_openrouter_for_cell(row, col, input, cache_key, request, result);
+            state.finish_openrouter_for_cell(
+                sheet_index,
+                row,
+                col,
+                input,
+                cache_key,
+                request,
+                result,
+            );
         });
     }
 
     pub(crate) async fn run_generate_image_for_cell(
         mut state: dioxus::prelude::Signal<Self>,
+        sheet_index: usize,
         row: usize,
         col: usize,
         input: String,
@@ -263,12 +275,13 @@ impl AppState {
         state.with_mut(|state| {
             let error_message = result.as_ref().err().map(ToString::to_string);
             state.finish_network_call(network_call_id, result.is_ok(), error_message);
-            state.finish_generate_image_for_cell(row, col, input, cache_key, result);
+            state.finish_generate_image_for_cell(sheet_index, row, col, input, cache_key, result);
         });
     }
 
     pub(crate) async fn run_generate_video_for_cell(
         mut state: dioxus::prelude::Signal<Self>,
+        sheet_index: usize,
         row: usize,
         col: usize,
         input: String,
@@ -281,12 +294,13 @@ impl AppState {
         state.with_mut(|state| {
             let error_message = result.as_ref().err().map(ToString::to_string);
             state.finish_network_call(network_call_id, result.is_ok(), error_message);
-            state.finish_generate_video_for_cell(row, col, input, cache_key, result);
+            state.finish_generate_video_for_cell(sheet_index, row, col, input, cache_key, result);
         });
     }
 
     pub(crate) async fn run_segment_for_cell(
         mut state: dioxus::prelude::Signal<Self>,
+        sheet_index: usize,
         row: usize,
         col: usize,
         input: String,
@@ -299,12 +313,13 @@ impl AppState {
         state.with_mut(|state| {
             let error_message = result.as_ref().err().map(ToString::to_string);
             state.finish_network_call(network_call_id, result.is_ok(), error_message);
-            state.finish_segment_for_cell(row, col, input, cache_key, result);
+            state.finish_segment_for_cell(sheet_index, row, col, input, cache_key, result);
         });
     }
 
     pub(crate) async fn run_concatenate_video_for_cell(
         mut state: dioxus::prelude::Signal<Self>,
+        sheet_index: usize,
         row: usize,
         col: usize,
         input: String,
@@ -314,7 +329,7 @@ impl AppState {
         let result = run_concatenate_video_request(&video_inputs).await;
 
         state.with_mut(|state| {
-            state.finish_concatenate_video_for_cell(row, col, input, cache_key, result);
+            state.finish_concatenate_video_for_cell(sheet_index, row, col, input, cache_key, result);
         });
     }
 
@@ -342,12 +357,60 @@ impl AppState {
             .collect()
     }
 
+    fn rebuild_pending_provider_calls_from_document(&mut self) {
+        self.pending_provider_calls.clear();
+        self.network_calls.clear();
+        self.next_network_call_id = 1;
+
+        let mut rebuilt = 0;
+        for (sheet_index, row, col) in self.document.pending_provider_cells() {
+            let work = self
+                .prepare_generate_image_for_cell_in_sheet(sheet_index, row, col, true)
+                .map(ProviderWork::GenerateImage)
+                .or_else(|| {
+                    self.prepare_generate_video_for_cell_in_sheet(sheet_index, row, col, true)
+                        .map(ProviderWork::GenerateVideo)
+                })
+                .or_else(|| {
+                    self.prepare_segment_for_cell_in_sheet(sheet_index, row, col, true)
+                        .map(ProviderWork::Segment)
+                })
+                .or_else(|| {
+                    self.prepare_llm_for_cell_in_sheet(sheet_index, row, col)
+                        .map(ProviderWork::Llm)
+                })
+                .or_else(|| {
+                    self.prepare_concatenate_video_for_cell_in_sheet(sheet_index, row, col)
+                        .map(ProviderWork::ConcatenateVideo)
+                });
+
+            if let Some(work) = work {
+                self.pending_provider_calls
+                    .push(QueuedProviderCall { work });
+                rebuilt += 1;
+            }
+        }
+
+        if rebuilt > 0 {
+            self.status = format!("Queued {rebuilt} pending provider calls from document");
+        }
+    }
+
     pub(crate) fn prepare_llm_for_cell(
         &mut self,
         row: usize,
         col: usize,
-    ) -> Option<(usize, usize, String, String, LlmRequest, u64)> {
-        let sheet = self.document.active_sheet()?;
+    ) -> Option<(usize, usize, usize, String, String, LlmRequest, u64)> {
+        self.prepare_llm_for_cell_in_sheet(0, row, col)
+    }
+
+    fn prepare_llm_for_cell_in_sheet(
+        &mut self,
+        sheet_index: usize,
+        row: usize,
+        col: usize,
+    ) -> Option<(usize, usize, usize, String, String, LlmRequest, u64)> {
+        let sheet = self.document.sheet(sheet_index)?;
         let cell = sheet.cell(row, col)?;
         if !llm_cell_is_runnable(&cell.value) {
             return None;
@@ -359,6 +422,7 @@ impl AppState {
 
         if let Some(cached) = cached_text(&self.document, &cache_key) {
             self.document.finish_openrouter_for_cell(
+                sheet_index,
                 row,
                 col,
                 input,
@@ -375,7 +439,7 @@ impl AppState {
             return None;
         }
 
-        if let Some(sheet) = self.document.active_sheet_mut() {
+        if let Some(sheet) = self.document.sheet_mut(sheet_index) {
             sheet.set_cell_value_with_cache(
                 row,
                 col,
@@ -399,7 +463,7 @@ impl AppState {
             &request,
         ));
 
-        Some((row, col, input, cache_key, request, network_call_id))
+        Some((sheet_index, row, col, input, cache_key, request, network_call_id))
     }
 
     pub(crate) fn prepare_generate_image_for_cell(
@@ -407,8 +471,18 @@ impl AppState {
         row: usize,
         col: usize,
         approval_required: bool,
-    ) -> Option<(usize, usize, String, String, GenerateImageRequest, u64)> {
-        let sheet = self.document.active_sheet()?;
+    ) -> Option<(usize, usize, usize, String, String, GenerateImageRequest, u64)> {
+        self.prepare_generate_image_for_cell_in_sheet(0, row, col, approval_required)
+    }
+
+    fn prepare_generate_image_for_cell_in_sheet(
+        &mut self,
+        sheet_index: usize,
+        row: usize,
+        col: usize,
+        approval_required: bool,
+    ) -> Option<(usize, usize, usize, String, String, GenerateImageRequest, u64)> {
+        let sheet = self.document.sheet(sheet_index)?;
         let cell = sheet.cell(row, col)?;
         if !generate_image_cell_is_runnable(&cell.value) {
             return None;
@@ -419,7 +493,7 @@ impl AppState {
             Ok(Some(request)) => request,
             Ok(None) => return None,
             Err(error) => {
-                if let Some(sheet) = self.document.active_sheet_mut() {
+                if let Some(sheet) = self.document.sheet_mut(sheet_index) {
                     sheet.set_cell_value_with_cache(row, col, input, CellValue::Error(error), None);
                 }
                 self.dirty = true;
@@ -429,7 +503,7 @@ impl AppState {
         let cache_key = generate_image_cache_key(&input, &request);
 
         if let Some(cached) = cached_media_cell_value(&self.document, &cache_key) {
-            if let Some(sheet) = self.document.active_sheet_mut() {
+            if let Some(sheet) = self.document.sheet_mut(sheet_index) {
                 sheet.set_cell_value_with_cache(
                     row,
                     col,
@@ -447,7 +521,7 @@ impl AppState {
         } else {
             "Running image generation...".to_string()
         };
-        if let Some(sheet) = self.document.active_sheet_mut() {
+        if let Some(sheet) = self.document.sheet_mut(sheet_index) {
             sheet.set_cell_value_with_cache(
                 row,
                 col,
@@ -475,7 +549,7 @@ impl AppState {
             &request,
         ));
 
-        Some((row, col, input, cache_key, request, network_call_id))
+        Some((sheet_index, row, col, input, cache_key, request, network_call_id))
     }
 
     pub(crate) fn prepare_generate_video_for_cell(
@@ -483,8 +557,18 @@ impl AppState {
         row: usize,
         col: usize,
         approval_required: bool,
-    ) -> Option<(usize, usize, String, String, GenerateVideoRequest, u64)> {
-        let sheet = self.document.active_sheet()?;
+    ) -> Option<(usize, usize, usize, String, String, GenerateVideoRequest, u64)> {
+        self.prepare_generate_video_for_cell_in_sheet(0, row, col, approval_required)
+    }
+
+    fn prepare_generate_video_for_cell_in_sheet(
+        &mut self,
+        sheet_index: usize,
+        row: usize,
+        col: usize,
+        approval_required: bool,
+    ) -> Option<(usize, usize, usize, String, String, GenerateVideoRequest, u64)> {
+        let sheet = self.document.sheet(sheet_index)?;
         let cell = sheet.cell(row, col)?;
         if !generate_video_cell_is_runnable(&cell.value) {
             return None;
@@ -495,7 +579,7 @@ impl AppState {
             Ok(Some(request)) => request,
             Ok(None) => return None,
             Err(error) => {
-                if let Some(sheet) = self.document.active_sheet_mut() {
+                if let Some(sheet) = self.document.sheet_mut(sheet_index) {
                     sheet.set_cell_value_with_cache(row, col, input, CellValue::Error(error), None);
                 }
                 self.dirty = true;
@@ -505,7 +589,7 @@ impl AppState {
         let cache_key = generate_video_cache_key(&input, &request);
 
         if let Some(cached) = cached_media_cell_value(&self.document, &cache_key) {
-            if let Some(sheet) = self.document.active_sheet_mut() {
+            if let Some(sheet) = self.document.sheet_mut(sheet_index) {
                 sheet.set_cell_value_with_cache(
                     row,
                     col,
@@ -523,7 +607,7 @@ impl AppState {
         } else {
             "Running video generation...".to_string()
         };
-        if let Some(sheet) = self.document.active_sheet_mut() {
+        if let Some(sheet) = self.document.sheet_mut(sheet_index) {
             sheet.set_cell_value_with_cache(
                 row,
                 col,
@@ -551,7 +635,7 @@ impl AppState {
             &request,
         ));
 
-        Some((row, col, input, cache_key, request, network_call_id))
+        Some((sheet_index, row, col, input, cache_key, request, network_call_id))
     }
 
     pub(crate) fn prepare_segment_for_cell(
@@ -559,8 +643,18 @@ impl AppState {
         row: usize,
         col: usize,
         approval_required: bool,
-    ) -> Option<(usize, usize, String, String, SegmentImageRequest, u64)> {
-        let sheet = self.document.active_sheet()?;
+    ) -> Option<(usize, usize, usize, String, String, SegmentImageRequest, u64)> {
+        self.prepare_segment_for_cell_in_sheet(0, row, col, approval_required)
+    }
+
+    fn prepare_segment_for_cell_in_sheet(
+        &mut self,
+        sheet_index: usize,
+        row: usize,
+        col: usize,
+        approval_required: bool,
+    ) -> Option<(usize, usize, usize, String, String, SegmentImageRequest, u64)> {
+        let sheet = self.document.sheet(sheet_index)?;
         let cell = sheet.cell(row, col)?;
         if !segment_cell_is_runnable(&cell.value) {
             return None;
@@ -571,7 +665,7 @@ impl AppState {
             Ok(Some(request)) => request,
             Ok(None) => return None,
             Err(error) => {
-                if let Some(sheet) = self.document.active_sheet_mut() {
+                if let Some(sheet) = self.document.sheet_mut(sheet_index) {
                     sheet.set_cell_value_with_cache(row, col, input, CellValue::Error(error), None);
                 }
                 self.dirty = true;
@@ -581,7 +675,7 @@ impl AppState {
         let cache_key = segment_cache_key(&input, &request);
 
         if let Some(cached) = cached_media_cell_value(&self.document, &cache_key) {
-            if let Some(sheet) = self.document.active_sheet_mut() {
+            if let Some(sheet) = self.document.sheet_mut(sheet_index) {
                 sheet.set_cell_value_with_cache(
                     row,
                     col,
@@ -599,7 +693,7 @@ impl AppState {
         } else {
             "Running segmentation...".to_string()
         };
-        if let Some(sheet) = self.document.active_sheet_mut() {
+        if let Some(sheet) = self.document.sheet_mut(sheet_index) {
             sheet.set_cell_value_with_cache(
                 row,
                 col,
@@ -627,15 +721,24 @@ impl AppState {
             &request,
         ));
 
-        Some((row, col, input, cache_key, request, network_call_id))
+        Some((sheet_index, row, col, input, cache_key, request, network_call_id))
     }
 
     pub(crate) fn prepare_concatenate_video_for_cell(
         &mut self,
         row: usize,
         col: usize,
-    ) -> Option<(usize, usize, String, String, Vec<String>)> {
-        let sheet = self.document.active_sheet()?;
+    ) -> Option<(usize, usize, usize, String, String, Vec<String>)> {
+        self.prepare_concatenate_video_for_cell_in_sheet(0, row, col)
+    }
+
+    fn prepare_concatenate_video_for_cell_in_sheet(
+        &mut self,
+        sheet_index: usize,
+        row: usize,
+        col: usize,
+    ) -> Option<(usize, usize, usize, String, String, Vec<String>)> {
+        let sheet = self.document.sheet(sheet_index)?;
         let cell = sheet.cell(row, col)?;
         if !concatenate_video_cell_is_runnable(&cell.value) {
             return None;
@@ -646,7 +749,7 @@ impl AppState {
             Ok(Some(video_inputs)) => video_inputs,
             Ok(None) => return None,
             Err(error) => {
-                if let Some(sheet) = self.document.active_sheet_mut() {
+                if let Some(sheet) = self.document.sheet_mut(sheet_index) {
                     sheet.set_cell_value_with_cache(row, col, input, CellValue::Error(error), None);
                 }
                 self.dirty = true;
@@ -656,7 +759,7 @@ impl AppState {
         let cache_key = concatenate_video_cache_key(&input, &video_inputs);
 
         if let Some(cached) = cached_media_cell_value(&self.document, &cache_key) {
-            if let Some(sheet) = self.document.active_sheet_mut() {
+            if let Some(sheet) = self.document.sheet_mut(sheet_index) {
                 sheet.set_cell_value_with_cache(
                     row,
                     col,
@@ -669,7 +772,7 @@ impl AppState {
             return None;
         }
 
-        if let Some(sheet) = self.document.active_sheet_mut() {
+        if let Some(sheet) = self.document.sheet_mut(sheet_index) {
             sheet.set_cell_value_with_cache(
                 row,
                 col,
@@ -682,11 +785,12 @@ impl AppState {
         }
         self.status = format!("Concatenating video clips for {}", cell_key(row, col));
 
-        Some((row, col, input, cache_key, video_inputs))
+        Some((sheet_index, row, col, input, cache_key, video_inputs))
     }
 
     pub(crate) fn finish_openrouter_for_cell(
         &mut self,
+        sheet_index: usize,
         row: usize,
         col: usize,
         input: String,
@@ -708,12 +812,13 @@ impl AppState {
             )
         };
         self.document
-            .finish_openrouter_for_cell(row, col, input, cache_key, request, result);
+            .finish_openrouter_for_cell(sheet_index, row, col, input, cache_key, request, result);
         self.dirty = true;
     }
 
     pub(crate) fn finish_generate_image_for_cell(
         &mut self,
+        sheet_index: usize,
         row: usize,
         col: usize,
         input: String,
@@ -750,7 +855,7 @@ impl AppState {
             }
         };
 
-        if let Some(sheet) = self.document.active_sheet_mut() {
+        if let Some(sheet) = self.document.sheet_mut(sheet_index) {
             sheet.set_cell_value_with_cache(row, col, input, value, Some(cache_key));
             if matches!(
                 sheet.cell(row, col).map(|cell| &cell.value),
@@ -768,6 +873,7 @@ impl AppState {
 
     pub(crate) fn finish_generate_video_for_cell(
         &mut self,
+        sheet_index: usize,
         row: usize,
         col: usize,
         input: String,
@@ -804,7 +910,7 @@ impl AppState {
             }
         };
 
-        if let Some(sheet) = self.document.active_sheet_mut() {
+        if let Some(sheet) = self.document.sheet_mut(sheet_index) {
             sheet.set_cell_value_with_cache(row, col, input, value, Some(cache_key));
             if matches!(
                 sheet.cell(row, col).map(|cell| &cell.value),
@@ -822,6 +928,7 @@ impl AppState {
 
     pub(crate) fn finish_segment_for_cell(
         &mut self,
+        sheet_index: usize,
         row: usize,
         col: usize,
         input: String,
@@ -858,7 +965,7 @@ impl AppState {
             }
         };
 
-        if let Some(sheet) = self.document.active_sheet_mut() {
+        if let Some(sheet) = self.document.sheet_mut(sheet_index) {
             sheet.set_cell_value_with_cache(row, col, input, value, Some(cache_key));
             if matches!(
                 sheet.cell(row, col).map(|cell| &cell.value),
@@ -876,6 +983,7 @@ impl AppState {
 
     pub(crate) fn finish_concatenate_video_for_cell(
         &mut self,
+        sheet_index: usize,
         row: usize,
         col: usize,
         input: String,
@@ -912,7 +1020,7 @@ impl AppState {
             }
         };
 
-        if let Some(sheet) = self.document.active_sheet_mut() {
+        if let Some(sheet) = self.document.sheet_mut(sheet_index) {
             sheet.set_cell_value_with_cache(row, col, input, value, Some(cache_key));
             if matches!(
                 sheet.cell(row, col).map(|cell| &cell.value),
@@ -1021,6 +1129,9 @@ impl AppState {
         self.file_menu_open = false;
         self.dirty = false;
         self.fill_dragging = None;
+        self.pending_provider_calls.clear();
+        self.network_calls.clear();
+        self.next_network_call_id = 1;
         self.status = "Created a new document".to_string();
         self.set_selected_cell(0, 0);
     }
@@ -1044,6 +1155,7 @@ impl AppState {
                 self.fill_dragging = None;
                 self.status = format!("Opened {}", path.display());
                 self.set_selected_cell(0, 0);
+                self.rebuild_pending_provider_calls_from_document();
             }
             Err(error) => {
                 self.status = error.to_string();
@@ -1410,8 +1522,16 @@ impl NetworkCallRecord {
 impl AppState {
     fn start_pending_provider_work(&mut self, work: &ProviderWork) {
         match work {
-            ProviderWork::Llm((row, col, input, cache_key, request, network_call_id)) => {
-                if let Some(sheet) = self.document.active_sheet_mut() {
+            ProviderWork::Llm((
+                sheet_index,
+                row,
+                col,
+                input,
+                cache_key,
+                request,
+                network_call_id,
+            )) => {
+                if let Some(sheet) = self.document.sheet_mut(*sheet_index) {
                     sheet.set_cell_value_with_cache(
                         *row,
                         *col,
@@ -1424,8 +1544,16 @@ impl AppState {
                 }
                 self.start_network_call(*network_call_id);
             }
-            ProviderWork::GenerateImage((row, col, input, cache_key, _, network_call_id)) => {
-                if let Some(sheet) = self.document.active_sheet_mut() {
+            ProviderWork::GenerateImage((
+                sheet_index,
+                row,
+                col,
+                input,
+                cache_key,
+                _,
+                network_call_id,
+            )) => {
+                if let Some(sheet) = self.document.sheet_mut(*sheet_index) {
                     sheet.set_cell_value_with_cache(
                         *row,
                         *col,
@@ -1438,8 +1566,16 @@ impl AppState {
                 }
                 self.start_network_call(*network_call_id);
             }
-            ProviderWork::GenerateVideo((row, col, input, cache_key, _, network_call_id)) => {
-                if let Some(sheet) = self.document.active_sheet_mut() {
+            ProviderWork::GenerateVideo((
+                sheet_index,
+                row,
+                col,
+                input,
+                cache_key,
+                _,
+                network_call_id,
+            )) => {
+                if let Some(sheet) = self.document.sheet_mut(*sheet_index) {
                     sheet.set_cell_value_with_cache(
                         *row,
                         *col,
@@ -1452,8 +1588,16 @@ impl AppState {
                 }
                 self.start_network_call(*network_call_id);
             }
-            ProviderWork::Segment((row, col, input, cache_key, _, network_call_id)) => {
-                if let Some(sheet) = self.document.active_sheet_mut() {
+            ProviderWork::Segment((
+                sheet_index,
+                row,
+                col,
+                input,
+                cache_key,
+                _,
+                network_call_id,
+            )) => {
+                if let Some(sheet) = self.document.sheet_mut(*sheet_index) {
                     sheet.set_cell_value_with_cache(
                         *row,
                         *col,
@@ -1466,8 +1610,8 @@ impl AppState {
                 }
                 self.start_network_call(*network_call_id);
             }
-            ProviderWork::ConcatenateVideo((row, col, input, cache_key, _)) => {
-                if let Some(sheet) = self.document.active_sheet_mut() {
+            ProviderWork::ConcatenateVideo((sheet_index, row, col, input, cache_key, _)) => {
+                if let Some(sheet) = self.document.sheet_mut(*sheet_index) {
                     sheet.set_cell_value_with_cache(
                         *row,
                         *col,
@@ -2190,6 +2334,53 @@ mod tests {
             state
                 .document
                 .active_sheet()
+                .and_then(|sheet| sheet.cell(0, 0))
+                .map(|cell| &cell.value),
+            Some(CellValue::FormulaPending { message }) if message == "Running image generation..."
+        ));
+    }
+
+    #[test]
+    fn saved_pending_provider_calls_are_rebuilt_for_approval() {
+        let mut state = AppState::new();
+        state.new_document();
+        state
+            .document
+            .sheets
+            .push(Sheet::new("Second", 2, 2));
+        state
+            .document
+            .sheets
+            .get_mut(1)
+            .unwrap()
+            .set_cell_input(0, 0, r#"=GENERATEIMAGE("A cat", "flux/dev")"#.to_string());
+
+        state.pending_provider_calls.clear();
+        state.network_calls.clear();
+        state.next_network_call_id = 1;
+        state.rebuild_pending_provider_calls_from_document();
+
+        assert_eq!(state.pending_provider_calls.len(), 1);
+        assert!(matches!(
+            state.network_calls.first().map(|record| record.status),
+            Some(NetworkCallStatus::PendingApproval)
+        ));
+        assert!(matches!(
+            state
+                .document
+                .sheet(1)
+                .and_then(|sheet| sheet.cell(0, 0))
+                .map(|cell| &cell.value),
+            Some(CellValue::FormulaPending { message })
+                if message == "fal.image request is pending approval"
+        ));
+
+        let works = state.dispatch_pending_provider_calls();
+        assert_eq!(works.len(), 1);
+        assert!(matches!(
+            state
+                .document
+                .sheet(1)
                 .and_then(|sheet| sheet.cell(0, 0))
                 .map(|cell| &cell.value),
             Some(CellValue::FormulaPending { message }) if message == "Running image generation..."

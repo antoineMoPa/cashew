@@ -677,9 +677,27 @@ mod tests {
     }
 
     #[test]
+    fn absolute_cell_references_stay_fixed_when_filled() {
+        let rewritten = offset_formula_references("=$C$21", 0, 1).unwrap();
+        assert_eq!(rewritten, "=$C$21");
+    }
+
+    #[test]
     fn offsets_formula_references_preserve_text_and_quotes() {
         let rewritten = offset_formula_references(r#"=LLM("see A1", A1, $B1, C$1)"#, 1, 2).unwrap();
         assert_eq!(rewritten, r#"=LLM("see A1", C2, $B2, E$1)"#);
+    }
+
+    #[test]
+    fn finds_formula_references_with_input_positions() {
+        let references = formula_references(r#"=SEGMENT(C3, "$A1", $D$4)"#);
+
+        assert_eq!(references.len(), 2);
+        assert_eq!(references[0].text, "C3");
+        assert_eq!((references[0].row, references[0].col), (2, 2));
+        assert_eq!((references[0].start, references[0].end), (9, 11));
+        assert_eq!(references[1].text, "$D$4");
+        assert_eq!((references[1].row, references[1].col), (3, 3));
     }
 
     #[test]
@@ -754,6 +772,25 @@ mod tests {
         assert_eq!(filled, FillRange::new((0, 0), (0, 4)));
         assert_eq!(sheet.cell(0, 3).map(|cell| cell.input.as_str()), Some("4"));
         assert_eq!(sheet.cell(0, 4).map(|cell| cell.input.as_str()), Some("5"));
+    }
+
+    #[test]
+    fn fills_horizontal_formula_patterns_by_varying_only_changed_references() {
+        let mut sheet = Sheet::new("Fill", 5, 6);
+        sheet.set_cell_input(0, 0, "=SEGMENT(C3,C4)".to_string());
+        sheet.set_cell_input(0, 1, "=SEGMENT(C3,D4)".to_string());
+
+        let filled = fill_region(&mut sheet, FillRange::new((0, 0), (0, 1)), (0, 3)).unwrap();
+
+        assert_eq!(filled, FillRange::new((0, 0), (0, 3)));
+        assert_eq!(
+            sheet.cell(0, 2).map(|cell| cell.input.as_str()),
+            Some("=SEGMENT(C3,E4)")
+        );
+        assert_eq!(
+            sheet.cell(0, 3).map(|cell| cell.input.as_str()),
+            Some("=SEGMENT(C3,F4)")
+        );
     }
 
     #[test]

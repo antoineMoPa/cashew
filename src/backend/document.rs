@@ -82,8 +82,35 @@ impl CashewDocument {
         self.sheets.first_mut()
     }
 
+    pub fn sheet(&self, index: usize) -> Option<&Sheet> {
+        self.sheets.get(index)
+    }
+
+    pub fn sheet_mut(&mut self, index: usize) -> Option<&mut Sheet> {
+        self.sheets.get_mut(index)
+    }
+
+    pub(crate) fn pending_provider_cells(&self) -> Vec<(usize, usize, usize)> {
+        let mut cells = Vec::new();
+
+        for (sheet_index, sheet) in self.sheets.iter().enumerate() {
+            for row in 0..sheet.rows {
+                for col in 0..sheet.cols {
+                    if sheet.cell(row, col).is_some_and(|cell| {
+                        matches!(cell.value, CellValue::FormulaPending { .. })
+                    }) {
+                        cells.push((sheet_index, row, col));
+                    }
+                }
+            }
+        }
+
+        cells
+    }
+
     pub(crate) fn finish_openrouter_for_cell(
         &mut self,
+        sheet_index: usize,
         row: usize,
         col: usize,
         input: String,
@@ -102,7 +129,7 @@ impl CashewDocument {
                     },
                 );
 
-                if let Some(sheet) = self.active_sheet_mut() {
+                if let Some(sheet) = self.sheet_mut(sheet_index) {
                     match parse_llm_output(request.output_mode, &output) {
                         Ok(parsed) => {
                             sheet.apply_openrouter_output(
@@ -139,7 +166,7 @@ impl CashewDocument {
                     },
                 );
 
-                if let Some(sheet) = self.active_sheet_mut() {
+                if let Some(sheet) = self.sheet_mut(sheet_index) {
                     sheet.set_cell_value_with_cache(
                         row,
                         col,
