@@ -299,7 +299,7 @@ pub const FORMULA_FUNCTIONS: &[FormulaFunction] = &[
     FormulaFunction {
         name: "SEGMENT",
         signature: "SEGMENT(image, prompt?, point_prompts?, box_prompts?, apply_mask?, output_format?, return_multiple_masks?, max_masks?, include_scores?, include_boxes?)",
-        insert_text: "=SEGMENT(image, \"wheel\")",
+        insert_text: "=SEGMENT($, \"wheel\")",
         runs_without_approval: false,
         summary: "Segment objects in an image through fal SAM 3.",
         details: "Runs through fal.ai's SAM 3 image segmentation endpoint. The first returned mask is stored in the cell while the full response remains in the document cache.",
@@ -317,7 +317,7 @@ pub const FORMULA_FUNCTIONS: &[FormulaFunction] = &[
     FormulaFunction {
         name: "GENERATEVIDEO",
         signature: "GENERATEVIDEO(prompt, image, model?, duration?, aspect_ratio?)",
-        insert_text: "=GENERATEVIDEO(prompt, image, \"fal-ai/veo3.1/reference-to-video\", 8, \"16:9\")",
+        insert_text: "=GENERATEVIDEO(prompt, $, \"fal-ai/veo3.1/reference-to-video\", 8, \"16:9\")",
         runs_without_approval: false,
         summary: "Generate or reuse a video clip from prompt and media inputs.",
         details: "Runs through fal video endpoints. The selected model determines whether the request uses image_url, image_urls, or start_image_url and which duration/aspect-ratio options are valid.",
@@ -347,7 +347,7 @@ pub const FORMULA_FUNCTIONS: &[FormulaFunction] = &[
     FormulaFunction {
         name: "LLM",
         signature: "LLM(prompt, model?, image..., system_prompt?)",
-        insert_text: "=LLM(prompt, \"google/gemini-2.5-flash\", image, system_prompt)",
+        insert_text: "=LLM(prompt, \"google/gemini-2.5-flash\", $, system_prompt)",
         runs_without_approval: true,
         summary: "Generate or transform text through fal OpenRouter.",
         details: "Runs through fal endpoint openrouter/router for text-only requests and openrouter/router/vision when image inputs are provided.",
@@ -366,7 +366,7 @@ pub const FORMULA_FUNCTIONS: &[FormulaFunction] = &[
     FormulaFunction {
         name: "LLM_LIST_DOWN",
         signature: "LLM_LIST_DOWN(prompt, model?, image..., system_prompt?)",
-        insert_text: "=LLM_LIST_DOWN(prompt, \"google/gemini-2.5-flash\", image, system_prompt)",
+        insert_text: "=LLM_LIST_DOWN(prompt, \"google/gemini-2.5-flash\", $, system_prompt)",
         runs_without_approval: true,
         summary: "Generate a vertical list through fal OpenRouter.",
         details: "Runs through fal endpoint openrouter/router or openrouter/router/vision, then spills the response into a single column.",
@@ -380,7 +380,7 @@ pub const FORMULA_FUNCTIONS: &[FormulaFunction] = &[
     FormulaFunction {
         name: "LLM_LIST_RIGHT",
         signature: "LLM_LIST_RIGHT(prompt, model?, image..., system_prompt?)",
-        insert_text: "=LLM_LIST_RIGHT(prompt, \"google/gemini-2.5-flash\", image, system_prompt)",
+        insert_text: "=LLM_LIST_RIGHT(prompt, \"google/gemini-2.5-flash\", $, system_prompt)",
         runs_without_approval: true,
         summary: "Generate a horizontal list through fal OpenRouter.",
         details: "Runs through fal endpoint openrouter/router or openrouter/router/vision, then spills the response into a single row.",
@@ -620,16 +620,16 @@ pub fn formula_example_for_function(
 
     match function.name {
         "GENERATEIMAGE" => format!("=GENERATEIMAGE(prompt, \"{model_id}\")"),
-        "SEGMENT" => "=SEGMENT(image, \"wheel\")".to_string(),
+        "SEGMENT" => "=SEGMENT($, \"wheel\")".to_string(),
         "GENERATEVIDEO" => {
-            format!("=GENERATEVIDEO(prompt, image, \"{model_id}\", 8, \"16:9\")")
+            format!("=GENERATEVIDEO(prompt, $, \"{model_id}\", 8, \"16:9\")")
         }
-        "LLM" => format!("=LLM(prompt, \"{model_id}\", image, system_prompt)"),
+        "LLM" => format!("=LLM(prompt, \"{model_id}\", $, system_prompt)"),
         "LLM_LIST_DOWN" => {
-            format!("=LLM_LIST_DOWN(prompt, \"{model_id}\", image, system_prompt)")
+            format!("=LLM_LIST_DOWN(prompt, \"{model_id}\", $, system_prompt)")
         }
         "LLM_LIST_RIGHT" => {
-            format!("=LLM_LIST_RIGHT(prompt, \"{model_id}\", image, system_prompt)")
+            format!("=LLM_LIST_RIGHT(prompt, \"{model_id}\", $, system_prompt)")
         }
         _ => function.insert_text.to_string(),
     }
@@ -800,7 +800,7 @@ mod tests {
                 *video_function,
                 Some("fal-ai/kling-video/v3/standard/image-to-video")
             ),
-            r#"=GENERATEVIDEO(prompt, image, "fal-ai/kling-video/v3/standard/image-to-video", 8, "16:9")"#
+            r#"=GENERATEVIDEO(prompt, $, "fal-ai/kling-video/v3/standard/image-to-video", 8, "16:9")"#
         );
         let segment_function = FORMULA_FUNCTIONS
             .iter()
@@ -808,7 +808,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             formula_example_for_function(*segment_function, None),
-            r#"=SEGMENT(image, "wheel")"#
+            r#"=SEGMENT($, "wheel")"#
         );
         let llm_function = FORMULA_FUNCTIONS
             .iter()
@@ -816,7 +816,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             formula_example_for_function(*llm_function, Some("google/gemini-2.5-flash")),
-            r#"=LLM(prompt, "google/gemini-2.5-flash", image, system_prompt)"#
+            r#"=LLM(prompt, "google/gemini-2.5-flash", $, system_prompt)"#
         );
         let llm_list_down = FORMULA_FUNCTIONS
             .iter()
@@ -824,7 +824,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             formula_example_for_function(*llm_list_down, Some("google/gemini-2.5-flash")),
-            r#"=LLM_LIST_DOWN(prompt, "google/gemini-2.5-flash", image, system_prompt)"#
+            r#"=LLM_LIST_DOWN(prompt, "google/gemini-2.5-flash", $, system_prompt)"#
         );
         let llm_list_right = FORMULA_FUNCTIONS
             .iter()
@@ -832,7 +832,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             formula_example_for_function(*llm_list_right, Some("google/gemini-2.5-flash")),
-            r#"=LLM_LIST_RIGHT(prompt, "google/gemini-2.5-flash", image, system_prompt)"#
+            r#"=LLM_LIST_RIGHT(prompt, "google/gemini-2.5-flash", $, system_prompt)"#
         );
     }
 

@@ -116,8 +116,15 @@ impl AppState {
             && range.start_col == range.end_col
             && self.selected_cell_mode == CellInteractionMode::Value
         {
+            let copied_rows = vec![vec![sheet
+                .cell(range.start_row, range.start_col)
+                .cloned()
+                .map(strip_spill_metadata)]];
             let text = cell_value_for_copy(&self.document, range.start_row, range.start_col);
-            self.copied_cells = None;
+            self.copied_cells = Some(CopiedCells {
+                text: text.clone(),
+                rows: copied_rows,
+            });
             self.status = format!(
                 "Copied value from {}",
                 cell_key(range.start_row, range.start_col)
@@ -290,6 +297,13 @@ impl AppState {
             }
         }
         sheet.recalculate_formulas();
+        let _ = sheet;
+        self.fit_media_rows_in_range(
+            start_row,
+            start_col,
+            start_row + row_count.saturating_sub(1),
+            start_col + col_count.saturating_sub(1),
+        );
 
         self.dirty = true;
         self.selection_anchor = (start_row, start_col);
@@ -494,6 +508,151 @@ mod tests {
                 "=LLM(A2)",
                 &CellValue::Cached("cached answer".to_string()),
                 Some("cache-key")
+            ))
+        );
+    }
+
+    #[test]
+    fn pasting_cached_media_into_empty_row_fits_row_height() {
+        let mut state = AppState::new();
+        state.new_document();
+        state.document.cache.insert(
+            "image-key".to_string(),
+            crate::backend::cache::CacheEntry {
+                key: "image-key".to_string(),
+                status: crate::backend::cache::CacheStatus::Ready,
+                value: crate::backend::cache::CachedValue::MediaAsset(
+                    crate::backend::cache::MediaAsset {
+                        provider: "fal.image".to_string(),
+                        media_type: crate::backend::cache::MediaType::Image,
+                        uri: "https://example.com/tall.png".to_string(),
+                        data_uri: None,
+                        metadata: serde_json::json!({
+                            "response": {
+                                "images": [{
+                                    "width": 100,
+                                    "height": 400
+                                }]
+                            }
+                        }),
+                    },
+                ),
+            },
+        );
+        state.document.sheet_mut().set_cell_value_with_cache(
+            0,
+            0,
+            "=GENERATEIMAGE(\"prompt\", \"flux/dev\")".to_string(),
+            CellValue::Cached("https://example.com/tall.png".to_string()),
+            Some("image-key".to_string()),
+        );
+
+        state.begin_selection(0, 0, false);
+        let copied = state.copy_selection();
+
+        state.begin_selection(2, 0, false);
+        state.paste_selection(&copied);
+
+        let sheet = state.document.sheet();
+        assert_eq!(sheet.row_height(2), 720);
+    }
+
+    #[test]
+    fn pasting_openai_cached_image_uses_data_uri_dimensions_when_metadata_is_missing() {
+        let mut state = AppState::new();
+        state.new_document();
+        state.document.cache.insert(
+            "image-key".to_string(),
+            crate::backend::cache::CacheEntry {
+                key: "image-key".to_string(),
+                status: crate::backend::cache::CacheStatus::Ready,
+                value: crate::backend::cache::CachedValue::MediaAsset(
+                    crate::backend::cache::MediaAsset {
+                        provider: "fal.image".to_string(),
+                        media_type: crate::backend::cache::MediaType::Image,
+                        uri: "https://example.com/tall.png".to_string(),
+                        data_uri: Some("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAECAIAAAAmkwkpAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC".to_string()),
+                        metadata: serde_json::json!({
+                            "response": {
+                                "images": [{
+                                    "width": null,
+                                    "height": null
+                                }]
+                            }
+                        }),
+                    },
+                ),
+            },
+        );
+        state.document.sheet_mut().set_cell_value_with_cache(
+            0,
+            0,
+            "=GENERATEIMAGE(\"prompt\", \"openai/gpt-image-2\", \"medium\", C29)".to_string(),
+            CellValue::Cached("https://example.com/tall.png".to_string()),
+            Some("image-key".to_string()),
+        );
+
+        state.begin_selection(0, 0, false);
+        let copied = state.copy_selection();
+
+        state.begin_selection(3, 0, false);
+        state.paste_selection(&copied);
+
+        let sheet = state.document.sheet();
+        assert_eq!(sheet.row_height(3), 720);
+    }
+
+    #[test]
+    fn value_mode_cut_and_paste_preserves_cached_media_cell_internally() {
+        let mut state = AppState::new();
+        state.new_document();
+        state.document.cache.insert(
+            "image-key".to_string(),
+            crate::backend::cache::CacheEntry {
+                key: "image-key".to_string(),
+                status: crate::backend::cache::CacheStatus::Ready,
+                value: crate::backend::cache::CachedValue::MediaAsset(
+                    crate::backend::cache::MediaAsset {
+                        provider: "fal.image".to_string(),
+                        media_type: crate::backend::cache::MediaType::Image,
+                        uri: "https://example.com/tall.png".to_string(),
+                        data_uri: Some("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAECAIAAAAmkwkpAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC".to_string()),
+                        metadata: serde_json::json!({
+                            "response": {
+                                "images": [{
+                                    "width": null,
+                                    "height": null
+                                }]
+                            }
+                        }),
+                    },
+                ),
+            },
+        );
+        state.document.sheet_mut().set_cell_value_with_cache(
+            0,
+            0,
+            "=GENERATEIMAGE(\"prompt\", \"openai/gpt-image-2\", \"medium\", C29)".to_string(),
+            CellValue::Cached("https://example.com/tall.png".to_string()),
+            Some("image-key".to_string()),
+        );
+        state.begin_selection(0, 0, false);
+        state.selected_cell_mode = CellInteractionMode::Value;
+
+        let copied = state.cut_selection();
+        assert!(copied.starts_with("data:image/png;base64,"));
+
+        state.begin_selection(4, 0, false);
+        state.paste_selection(&copied);
+
+        let sheet = state.document.sheet();
+        assert_eq!(
+            sheet
+                .cell(4, 0)
+                .map(|cell| (cell.input.as_str(), cell.cache_key.as_deref())),
+            Some((
+                "=GENERATEIMAGE(\"prompt\", \"openai/gpt-image-2\", \"medium\", C29)",
+                Some("image-key")
             ))
         );
     }

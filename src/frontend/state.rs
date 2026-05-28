@@ -14,7 +14,7 @@ use super::selection::{CopiedCells, SelectionRange};
 use crate::backend::cache::{
     CacheEntry, CacheStatus, CachedValue, MediaAsset, MediaType, stable_cache_key,
 };
-use crate::backend::document::{CashewDocument, CellValue, cell_key, column_name};
+use crate::backend::document::{CashewDocument, Cell, CellValue, Sheet, cell_key, column_name};
 use crate::backend::fill::FillRange;
 use crate::backend::formula_implementations::{
     LlmOutputMode, LlmRequest, concatenate_video_inputs_for_sheet,
@@ -788,8 +788,10 @@ impl AppState {
         cache_key: String,
         result: anyhow::Result<MediaAsset>,
     ) {
+        let mut media_dimensions = None;
         let value = match result {
             Ok(asset) => {
+                media_dimensions = media_dimensions_from_metadata(&asset.metadata);
                 let uri = asset.uri.clone();
                 self.document.cache.insert(
                     cache_key.clone(),
@@ -824,10 +826,14 @@ impl AppState {
             sheet.cell(row, col).map(|cell| &cell.value),
             Some(CellValue::Cached(_))
         ) {
-            let width = sheet.column_width(col).max(GENERATED_IMAGE_COLUMN_WIDTH);
-            let height = sheet.row_height(row).max(GENERATED_IMAGE_ROW_HEIGHT);
-            sheet.set_column_width(col, width);
-            sheet.set_row_height(row, height);
+            resize_media_cell(
+                sheet,
+                row,
+                col,
+                GENERATED_IMAGE_COLUMN_WIDTH,
+                GENERATED_IMAGE_ROW_HEIGHT,
+                media_dimensions,
+            );
         }
         sheet.recalculate_formulas();
         self.dirty = true;
@@ -841,8 +847,10 @@ impl AppState {
         cache_key: String,
         result: anyhow::Result<MediaAsset>,
     ) {
+        let mut media_dimensions = None;
         let value = match result {
             Ok(asset) => {
+                media_dimensions = media_dimensions_from_metadata(&asset.metadata);
                 let uri = asset.uri.clone();
                 self.document.cache.insert(
                     cache_key.clone(),
@@ -877,10 +885,14 @@ impl AppState {
             sheet.cell(row, col).map(|cell| &cell.value),
             Some(CellValue::Cached(_))
         ) {
-            let width = sheet.column_width(col).max(GENERATED_VIDEO_COLUMN_WIDTH);
-            let height = sheet.row_height(row).max(GENERATED_VIDEO_ROW_HEIGHT);
-            sheet.set_column_width(col, width);
-            sheet.set_row_height(row, height);
+            resize_media_cell(
+                sheet,
+                row,
+                col,
+                GENERATED_VIDEO_COLUMN_WIDTH,
+                GENERATED_VIDEO_ROW_HEIGHT,
+                media_dimensions,
+            );
         }
         sheet.recalculate_formulas();
         self.dirty = true;
@@ -894,8 +906,10 @@ impl AppState {
         cache_key: String,
         result: anyhow::Result<MediaAsset>,
     ) {
+        let mut media_dimensions = None;
         let value = match result {
             Ok(asset) => {
+                media_dimensions = media_dimensions_from_metadata(&asset.metadata);
                 let uri = asset.uri.clone();
                 self.document.cache.insert(
                     cache_key.clone(),
@@ -930,10 +944,14 @@ impl AppState {
             sheet.cell(row, col).map(|cell| &cell.value),
             Some(CellValue::Cached(_))
         ) {
-            let width = sheet.column_width(col).max(GENERATED_IMAGE_COLUMN_WIDTH);
-            let height = sheet.row_height(row).max(GENERATED_IMAGE_ROW_HEIGHT);
-            sheet.set_column_width(col, width);
-            sheet.set_row_height(row, height);
+            resize_media_cell(
+                sheet,
+                row,
+                col,
+                GENERATED_IMAGE_COLUMN_WIDTH,
+                GENERATED_IMAGE_ROW_HEIGHT,
+                media_dimensions,
+            );
         }
         sheet.recalculate_formulas();
         self.dirty = true;
@@ -947,8 +965,10 @@ impl AppState {
         cache_key: String,
         result: anyhow::Result<MediaAsset>,
     ) {
+        let mut media_dimensions = None;
         let value = match result {
             Ok(asset) => {
+                media_dimensions = media_dimensions_from_metadata(&asset.metadata);
                 let uri = asset.uri.clone();
                 self.document.cache.insert(
                     cache_key.clone(),
@@ -983,13 +1003,68 @@ impl AppState {
             sheet.cell(row, col).map(|cell| &cell.value),
             Some(CellValue::Cached(_))
         ) {
-            let width = sheet.column_width(col).max(GENERATED_VIDEO_COLUMN_WIDTH);
-            let height = sheet.row_height(row).max(GENERATED_VIDEO_ROW_HEIGHT);
-            sheet.set_column_width(col, width);
-            sheet.set_row_height(row, height);
+            resize_media_cell(
+                sheet,
+                row,
+                col,
+                GENERATED_VIDEO_COLUMN_WIDTH,
+                GENERATED_VIDEO_ROW_HEIGHT,
+                media_dimensions,
+            );
         }
         sheet.recalculate_formulas();
         self.dirty = true;
+    }
+
+    pub(crate) fn fit_media_rows_in_range(
+        &mut self,
+        start_row: usize,
+        start_col: usize,
+        end_row: usize,
+        end_col: usize,
+    ) {
+        let mut planned_resizes = Vec::new();
+
+        {
+            let sheet = self.document.sheet();
+            for row in start_row..=end_row {
+                for col in start_col..=end_col {
+                    let Some(cell) = sheet.cell(row, col) else {
+                        continue;
+                    };
+                    let Some(cache_key) = cell.cache_key.as_deref() else {
+                        continue;
+                    };
+                    let Some(asset) = cached_media_asset(&self.document, cache_key) else {
+                        continue;
+                    };
+                    let Some((minimum_column_width, minimum_row_height)) =
+                        media_size_defaults(&asset.media_type)
+                    else {
+                        continue;
+                    };
+                    planned_resizes.push((
+                        row,
+                        col,
+                        minimum_column_width,
+                        minimum_row_height,
+                        media_dimensions_from_asset(asset),
+                    ));
+                }
+            }
+        }
+
+        let sheet = self.document.sheet_mut();
+        for (row, col, minimum_column_width, minimum_row_height, media_dimensions) in planned_resizes {
+            resize_media_cell(
+                sheet,
+                row,
+                col,
+                minimum_column_width,
+                minimum_row_height,
+                media_dimensions,
+            );
+        }
     }
 
     pub(crate) fn set_selected_formula(&mut self, value: String) {
@@ -2070,6 +2145,207 @@ fn media_extension_from_uri(uri: &str) -> Option<&'static str> {
     }
 }
 
+fn resize_media_cell(
+    sheet: &mut Sheet,
+    row: usize,
+    col: usize,
+    minimum_column_width: u16,
+    minimum_row_height: u16,
+    media_dimensions: Option<(u32, u32)>,
+) {
+    let width = sheet.column_width(col).max(minimum_column_width);
+    sheet.set_column_width(col, width);
+
+    let height = if row_has_only_media_content(sheet, row, col) {
+        fitted_row_height(width, media_dimensions.unwrap_or((0, 0)))
+            .map(|height| height.max(minimum_row_height))
+            .unwrap_or(minimum_row_height)
+    } else {
+        minimum_row_height
+    };
+
+    sheet.set_row_height(row, sheet.row_height(row).max(height));
+}
+
+fn row_has_only_media_content(sheet: &Sheet, row: usize, media_col: usize) -> bool {
+    if !sheet
+        .cell(row, media_col)
+        .is_some_and(cell_contains_media_value)
+    {
+        return false;
+    }
+
+    for col in 0..sheet.cols {
+        if col == media_col {
+            continue;
+        }
+
+        if sheet.cell(row, col).is_some_and(cell_has_visible_content) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn cell_contains_media_value(cell: &Cell) -> bool {
+    matches!(cell.value, CellValue::Cached(_))
+}
+
+fn cell_has_visible_content(cell: &Cell) -> bool {
+    match &cell.value {
+        CellValue::Empty => false,
+        CellValue::Text(value) | CellValue::Cached(value) => !value.trim().is_empty(),
+        CellValue::FormulaPending { .. } | CellValue::Error(_) => true,
+    }
+}
+
+fn media_dimensions_from_metadata(metadata: &serde_json::Value) -> Option<(u32, u32)> {
+    image_dimensions_from_metadata(metadata).or_else(|| video_dimensions_from_metadata(metadata))
+}
+
+fn media_dimensions_from_asset(asset: &MediaAsset) -> Option<(u32, u32)> {
+    media_dimensions_from_metadata(&asset.metadata).or_else(|| {
+        asset
+            .data_uri
+            .as_deref()
+            .and_then(media_dimensions_from_data_uri)
+    })
+}
+
+fn media_size_defaults(media_type: &MediaType) -> Option<(u16, u16)> {
+    match media_type {
+        MediaType::Image => Some((GENERATED_IMAGE_COLUMN_WIDTH, GENERATED_IMAGE_ROW_HEIGHT)),
+        MediaType::Video => Some((GENERATED_VIDEO_COLUMN_WIDTH, GENERATED_VIDEO_ROW_HEIGHT)),
+        MediaType::Audio | MediaType::Other(_) => None,
+    }
+}
+
+fn cached_media_asset<'a>(document: &'a CashewDocument, cache_key: &str) -> Option<&'a MediaAsset> {
+    let entry = document.cache.get(cache_key)?;
+    if entry.status != CacheStatus::Ready {
+        return None;
+    }
+
+    match &entry.value {
+        CachedValue::MediaAsset(asset) => Some(asset),
+        CachedValue::Text(_) | CachedValue::Json(_) => None,
+    }
+}
+
+fn image_dimensions_from_metadata(metadata: &serde_json::Value) -> Option<(u32, u32)> {
+    let image = metadata
+        .get("response")?
+        .get("images")?
+        .as_array()?
+        .first()?;
+    let width = image.get("width")?.as_u64()? as u32;
+    let height = image.get("height")?.as_u64()? as u32;
+    Some((width, height))
+}
+
+fn video_dimensions_from_metadata(metadata: &serde_json::Value) -> Option<(u32, u32)> {
+    let aspect_ratio = metadata
+        .get("request")
+        .and_then(|request| request.get("aspect_ratio"))
+        .and_then(serde_json::Value::as_str)?;
+    aspect_ratio_dimensions(aspect_ratio)
+}
+
+fn aspect_ratio_dimensions(aspect_ratio: &str) -> Option<(u32, u32)> {
+    let (width, height) = aspect_ratio.split_once(':')?;
+    let width = width.trim().parse::<u32>().ok()?;
+    let height = height.trim().parse::<u32>().ok()?;
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+fn fitted_row_height(width: u16, dimensions: (u32, u32)) -> Option<u16> {
+    let (media_width, media_height) = dimensions;
+    if media_width == 0 || media_height == 0 {
+        return None;
+    }
+
+    let scaled_height = (u32::from(width) * media_height) / media_width;
+    let scaled_height = scaled_height.max(1).min(u32::from(u16::MAX));
+    u16::try_from(scaled_height).ok()
+}
+
+fn media_dimensions_from_data_uri(data_uri: &str) -> Option<(u32, u32)> {
+    let (header, payload) = data_uri.split_once(',')?;
+    if !header.contains(";base64") {
+        return None;
+    }
+
+    let bytes = STANDARD.decode(payload).ok()?;
+    png_dimensions(&bytes).or_else(|| jpeg_dimensions(&bytes))
+}
+
+fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    if bytes.len() < 24 || &bytes[..8] != PNG_SIGNATURE {
+        return None;
+    }
+
+    let width = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+    let height = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
+        return None;
+    }
+
+    let mut index = 2;
+    while index + 9 < bytes.len() {
+        if bytes[index] != 0xFF {
+            index += 1;
+            continue;
+        }
+
+        while index < bytes.len() && bytes[index] == 0xFF {
+            index += 1;
+        }
+        if index >= bytes.len() {
+            return None;
+        }
+
+        let marker = bytes[index];
+        index += 1;
+
+        if marker == 0xD9 || marker == 0xDA {
+            return None;
+        }
+
+        if index + 1 >= bytes.len() {
+            return None;
+        }
+        let segment_length = u16::from_be_bytes(bytes[index..index + 2].try_into().ok()?) as usize;
+        if segment_length < 2 || index + segment_length > bytes.len() {
+            return None;
+        }
+
+        let is_sof = matches!(
+            marker,
+            0xC0 | 0xC1 | 0xC2 | 0xC3 | 0xC5 | 0xC6 | 0xC7 | 0xC9 | 0xCA | 0xCB | 0xCD | 0xCE | 0xCF
+        );
+        if is_sof {
+            if segment_length < 7 {
+                return None;
+            }
+            let height =
+                u16::from_be_bytes(bytes[index + 3..index + 5].try_into().ok()?) as u32;
+            let width =
+                u16::from_be_bytes(bytes[index + 5..index + 7].try_into().ok()?) as u32;
+            return (width > 0 && height > 0).then_some((width, height));
+        }
+
+        index += segment_length;
+    }
+
+    None
+}
+
 fn escape_ffmpeg_concat_path(path: &Path) -> String {
     path.to_string_lossy().replace('\'', "'\\''")
 }
@@ -2204,6 +2480,24 @@ mod tests {
     }
 
     #[test]
+    fn inserted_generate_video_formula_uses_cell_reference_marker() {
+        let mut state = AppState::new();
+        let function = crate::backend::formulas::FORMULA_FUNCTIONS
+            .iter()
+            .find(|function| function.name == "GENERATEVIDEO")
+            .copied()
+            .unwrap();
+
+        state.insert_formula(function);
+        state.insert_cell_reference(30, 2);
+
+        assert_eq!(
+            state.formula_input,
+            "=GENERATEVIDEO(prompt, C31, \"fal-ai/veo3.1/reference-to-video\", 8, \"16:9\")"
+        );
+    }
+
+    #[test]
     fn cached_media_cell_value_prefers_provider_uri_over_embedded_data() {
         let mut document = CashewDocument::new("Cache");
         document.cache.insert(
@@ -2225,6 +2519,40 @@ mod tests {
             cached_media_cell_value(&document, "image-key"),
             Some("https://example.com/ref.png".to_string())
         );
+    }
+
+    #[test]
+    fn media_only_row_grows_to_match_image_aspect_ratio() {
+        let mut state = AppState::new();
+
+        state.finish_generate_image_for_cell(
+            0,
+            0,
+            "=GENERATEIMAGE(\"prompt\", \"flux/dev\")".to_string(),
+            "image-key".to_string(),
+            Ok(test_image_asset("https://example.com/tall.png", 100, 400)),
+        );
+
+        let sheet = state.document.sheet();
+        assert_eq!(sheet.column_width(0), GENERATED_IMAGE_COLUMN_WIDTH);
+        assert_eq!(sheet.row_height(0), 720);
+    }
+
+    #[test]
+    fn media_row_keeps_default_height_when_other_cells_have_content() {
+        let mut state = AppState::new();
+        state.set_cell_input(0, 1, "notes".to_string());
+
+        state.finish_generate_image_for_cell(
+            0,
+            0,
+            "=GENERATEIMAGE(\"prompt\", \"flux/dev\")".to_string(),
+            "image-key".to_string(),
+            Ok(test_image_asset("https://example.com/tall.png", 100, 400)),
+        );
+
+        let sheet = state.document.sheet();
+        assert_eq!(sheet.row_height(0), GENERATED_IMAGE_ROW_HEIGHT);
     }
 
     #[test]
@@ -2365,6 +2693,23 @@ mod tests {
             record.request_body["image_urls"],
             "<2 images shown in Images>"
         );
+    }
+
+    fn test_image_asset(uri: &str, width: u32, height: u32) -> MediaAsset {
+        MediaAsset {
+            provider: "fal.image".to_string(),
+            media_type: MediaType::Image,
+            uri: uri.to_string(),
+            data_uri: None,
+            metadata: serde_json::json!({
+                "response": {
+                    "images": [{
+                        "width": width,
+                        "height": height
+                    }]
+                }
+            }),
+        }
     }
 
     #[test]
