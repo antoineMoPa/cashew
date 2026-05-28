@@ -16,7 +16,7 @@ use super::{
 pub struct CashewDocument {
     pub version: u32,
     pub title: String,
-    pub sheets: Vec<Sheet>,
+    pub sheet: Sheet,
     pub cache: BTreeMap<String, CacheEntry>,
 }
 
@@ -54,9 +54,9 @@ pub enum CellValue {
 impl CashewDocument {
     pub fn new(title: impl Into<String>) -> Self {
         Self {
-            version: 1,
+            version: 2,
             title: title.into(),
-            sheets: vec![Sheet::new("Default", 12, 8)],
+            sheet: Sheet::new("Default", 12, 8),
             cache: BTreeMap::new(),
         }
     }
@@ -74,33 +74,25 @@ impl CashewDocument {
         fs::write(path, json).with_context(|| format!("failed to write {}", path.display()))
     }
 
-    pub fn active_sheet(&self) -> Option<&Sheet> {
-        self.sheets.first()
+    pub fn sheet(&self) -> &Sheet {
+        &self.sheet
     }
 
-    pub fn active_sheet_mut(&mut self) -> Option<&mut Sheet> {
-        self.sheets.first_mut()
+    pub fn sheet_mut(&mut self) -> &mut Sheet {
+        &mut self.sheet
     }
 
-    pub fn sheet(&self, index: usize) -> Option<&Sheet> {
-        self.sheets.get(index)
-    }
-
-    pub fn sheet_mut(&mut self, index: usize) -> Option<&mut Sheet> {
-        self.sheets.get_mut(index)
-    }
-
-    pub(crate) fn pending_provider_cells(&self) -> Vec<(usize, usize, usize)> {
+    pub(crate) fn pending_provider_cells(&self) -> Vec<(usize, usize)> {
         let mut cells = Vec::new();
 
-        for (sheet_index, sheet) in self.sheets.iter().enumerate() {
-            for row in 0..sheet.rows {
-                for col in 0..sheet.cols {
-                    if sheet.cell(row, col).is_some_and(|cell| {
-                        matches!(cell.value, CellValue::FormulaPending { .. })
-                    }) {
-                        cells.push((sheet_index, row, col));
-                    }
+        for row in 0..self.sheet.rows {
+            for col in 0..self.sheet.cols {
+                if self
+                    .sheet
+                    .cell(row, col)
+                    .is_some_and(|cell| matches!(cell.value, CellValue::FormulaPending { .. }))
+                {
+                    cells.push((row, col));
                 }
             }
         }
@@ -110,7 +102,6 @@ impl CashewDocument {
 
     pub(crate) fn finish_openrouter_for_cell(
         &mut self,
-        sheet_index: usize,
         row: usize,
         col: usize,
         input: String,
@@ -129,30 +120,29 @@ impl CashewDocument {
                     },
                 );
 
-                if let Some(sheet) = self.sheet_mut(sheet_index) {
-                    match parse_llm_output(request.output_mode, &output) {
-                        Ok(parsed) => {
-                            sheet.apply_openrouter_output(
-                                row,
-                                col,
-                                input,
-                                Some(cache_key),
-                                &request,
-                                parsed,
-                            );
-                        }
-                        Err(error) => {
-                            sheet.set_cell_value_with_cache(
-                                row,
-                                col,
-                                input,
-                                CellValue::Error(error),
-                                Some(cache_key),
-                            );
-                        }
+                let sheet = self.sheet_mut();
+                match parse_llm_output(request.output_mode, &output) {
+                    Ok(parsed) => {
+                        sheet.apply_openrouter_output(
+                            row,
+                            col,
+                            input,
+                            Some(cache_key),
+                            &request,
+                            parsed,
+                        );
                     }
-                    sheet.recalculate_formulas();
+                    Err(error) => {
+                        sheet.set_cell_value_with_cache(
+                            row,
+                            col,
+                            input,
+                            CellValue::Error(error),
+                            Some(cache_key),
+                        );
+                    }
                 }
+                sheet.recalculate_formulas();
             }
             Err(error) => {
                 self.cache.insert(
@@ -166,16 +156,15 @@ impl CashewDocument {
                     },
                 );
 
-                if let Some(sheet) = self.sheet_mut(sheet_index) {
-                    sheet.set_cell_value_with_cache(
-                        row,
-                        col,
-                        input,
-                        CellValue::Error(error.to_string()),
-                        Some(cache_key),
-                    );
-                    sheet.recalculate_formulas();
-                }
+                let sheet = self.sheet_mut();
+                sheet.set_cell_value_with_cache(
+                    row,
+                    col,
+                    input,
+                    CellValue::Error(error.to_string()),
+                    Some(cache_key),
+                );
+                sheet.recalculate_formulas();
             }
         }
     }
@@ -520,16 +509,13 @@ mod tests {
     fn default_sheet_is_named_default() {
         let document = CashewDocument::default();
 
-        assert_eq!(
-            document.active_sheet().map(|sheet| sheet.name.as_str()),
-            Some("Default")
-        );
+        assert_eq!(document.sheet().name.as_str(), "Default");
     }
 
     #[test]
     fn document_round_trips_as_json() {
         let mut document = CashewDocument::new("Movie draft");
-        document.active_sheet_mut().unwrap().set_cell_input(
+        document.sheet_mut().set_cell_input(
             0,
             0,
             "=GENERATEIMAGE(A1,A2)".to_string(),

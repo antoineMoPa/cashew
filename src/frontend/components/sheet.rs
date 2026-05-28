@@ -10,10 +10,9 @@ use super::super::state::{
     AppState, CellInteractionMode, MIN_VISIBLE_COLS, MIN_VISIBLE_ROWS, ResizeDrag, ResizeKind,
 };
 
-type LlmWork = (usize, usize, usize, String, String, LlmRequest, u64);
+type LlmWork = (usize, usize, String, String, LlmRequest, u64);
 
 type GenerateImageWork = (
-    usize,
     usize,
     usize,
     String,
@@ -25,7 +24,6 @@ type GenerateImageWork = (
 type GenerateVideoWork = (
     usize,
     usize,
-    usize,
     String,
     String,
     crate::backend::providers::fal_video::GenerateVideoRequest,
@@ -35,14 +33,13 @@ type GenerateVideoWork = (
 type SegmentWork = (
     usize,
     usize,
-    usize,
     String,
     String,
     crate::backend::providers::fal_segment::SegmentImageRequest,
     u64,
 );
 
-type ConcatenateVideoWork = (usize, usize, usize, String, String, Vec<String>);
+type ConcatenateVideoWork = (usize, usize, String, String, Vec<String>);
 
 #[derive(Debug, Clone)]
 pub(crate) enum ProviderWork {
@@ -115,9 +112,7 @@ pub(crate) fn SheetView(mut state: Signal<AppState>) -> Element {
     });
 
     let snapshot = state.read();
-    let Some(sheet) = snapshot.document.active_sheet() else {
-        return rsx! { div { class: "empty-sheet", "No sheet" } };
-    };
+    let sheet = snapshot.document.sheet();
 
     let rows = sheet.rows.max(MIN_VISIBLE_ROWS);
     let cols = sheet.cols.max(MIN_VISIBLE_COLS);
@@ -952,7 +947,6 @@ pub(crate) fn prepare_provider_work(
 pub(crate) fn spawn_provider_work(state: Signal<AppState>, work: Option<ProviderWork>) {
     match work {
         Some(ProviderWork::Llm((
-            sheet_index,
             row,
             col,
             input,
@@ -963,7 +957,6 @@ pub(crate) fn spawn_provider_work(state: Signal<AppState>, work: Option<Provider
             spawn(async move {
                 AppState::run_openrouter_for_cell(
                     state,
-                    sheet_index,
                     row,
                     col,
                     input,
@@ -975,7 +968,6 @@ pub(crate) fn spawn_provider_work(state: Signal<AppState>, work: Option<Provider
             });
         }
         Some(ProviderWork::GenerateImage((
-            sheet_index,
             row,
             col,
             input,
@@ -986,7 +978,6 @@ pub(crate) fn spawn_provider_work(state: Signal<AppState>, work: Option<Provider
             spawn(async move {
                 AppState::run_generate_image_for_cell(
                     state,
-                    sheet_index,
                     row,
                     col,
                     input,
@@ -998,7 +989,6 @@ pub(crate) fn spawn_provider_work(state: Signal<AppState>, work: Option<Provider
             });
         }
         Some(ProviderWork::GenerateVideo((
-            sheet_index,
             row,
             col,
             input,
@@ -1009,7 +999,6 @@ pub(crate) fn spawn_provider_work(state: Signal<AppState>, work: Option<Provider
             spawn(async move {
                 AppState::run_generate_video_for_cell(
                     state,
-                    sheet_index,
                     row,
                     col,
                     input,
@@ -1021,7 +1010,6 @@ pub(crate) fn spawn_provider_work(state: Signal<AppState>, work: Option<Provider
             });
         }
         Some(ProviderWork::Segment((
-            sheet_index,
             row,
             col,
             input,
@@ -1032,7 +1020,6 @@ pub(crate) fn spawn_provider_work(state: Signal<AppState>, work: Option<Provider
             spawn(async move {
                 AppState::run_segment_for_cell(
                     state,
-                    sheet_index,
                     row,
                     col,
                     input,
@@ -1044,7 +1031,6 @@ pub(crate) fn spawn_provider_work(state: Signal<AppState>, work: Option<Provider
             });
         }
         Some(ProviderWork::ConcatenateVideo((
-            sheet_index,
             row,
             col,
             input,
@@ -1054,7 +1040,6 @@ pub(crate) fn spawn_provider_work(state: Signal<AppState>, work: Option<Provider
             spawn(async move {
                 AppState::run_concatenate_video_for_cell(
                     state,
-                    sheet_index,
                     row,
                     col,
                     input,
@@ -1086,8 +1071,8 @@ pub(crate) fn queue_or_spawn_provider_work(mut state: Signal<AppState>, row: usi
 fn provider_requires_approval(state: &AppState, row: usize, col: usize) -> bool {
     state
         .document
-        .active_sheet()
-        .and_then(|sheet| sheet.cell(row, col))
+        .sheet()
+        .cell(row, col)
         .and_then(|cell| function_for_formula_input(&cell.input))
         .map(|function| !function.runs_without_approval)
         .unwrap_or(false)

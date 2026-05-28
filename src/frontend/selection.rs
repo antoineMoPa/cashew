@@ -109,9 +109,7 @@ impl AppState {
     }
 
     pub(crate) fn copy_selection(&mut self) -> String {
-        let Some(sheet) = self.document.active_sheet() else {
-            return String::new();
-        };
+        let sheet = self.document.sheet();
 
         let range = self.selection_range();
         if range.start_row == range.end_row
@@ -274,25 +272,24 @@ impl AppState {
             start_col + col_count + GROWTH_BUFFER_COLS,
         );
 
-        if let Some(sheet) = self.document.active_sheet_mut() {
-            for (row_offset, row_values) in copied.rows.into_iter().enumerate() {
-                for (col_offset, cell) in row_values.into_iter().enumerate() {
-                    let row = start_row + row_offset;
-                    let col = start_col + col_offset;
-                    sheet.ensure_size(row + 1, col + 1);
-                    sheet.cells.insert(
-                        cell_key(row, col),
-                        cell.map(strip_spill_metadata).unwrap_or(Cell {
-                            input: String::new(),
-                            value: CellValue::Empty,
-                            cache_key: None,
-                            spill_range: None,
-                        }),
-                    );
-                }
+        let sheet = self.document.sheet_mut();
+        for (row_offset, row_values) in copied.rows.into_iter().enumerate() {
+            for (col_offset, cell) in row_values.into_iter().enumerate() {
+                let row = start_row + row_offset;
+                let col = start_col + col_offset;
+                sheet.ensure_size(row + 1, col + 1);
+                sheet.cells.insert(
+                    cell_key(row, col),
+                    cell.map(strip_spill_metadata).unwrap_or(Cell {
+                        input: String::new(),
+                        value: CellValue::Empty,
+                        cache_key: None,
+                        spill_range: None,
+                    }),
+                );
             }
-            sheet.recalculate_formulas();
         }
+        sheet.recalculate_formulas();
 
         self.dirty = true;
         self.selection_anchor = (start_row, start_col);
@@ -319,9 +316,7 @@ impl AppState {
 }
 
 fn cell_value_for_copy(document: &CashewDocument, row: usize, col: usize) -> String {
-    let Some(sheet) = document.active_sheet() else {
-        return String::new();
-    };
+    let sheet = document.sheet();
     let Some(cell) = sheet.cell(row, col) else {
         return String::new();
     };
@@ -403,7 +398,7 @@ mod tests {
 
         assert_eq!(state.cut_selection(), "first\tsecond");
 
-        let sheet = state.document.active_sheet().unwrap();
+        let sheet = state.document.sheet();
         assert_eq!(
             sheet.cell(0, 0).map(|cell| &cell.value),
             Some(&crate::backend::document::CellValue::Empty)
@@ -425,7 +420,7 @@ mod tests {
 
         state.clear_selection();
 
-        let sheet = state.document.active_sheet().unwrap();
+        let sheet = state.document.sheet();
         assert_eq!(
             sheet.cell(0, 0).map(|cell| &cell.value),
             Some(&crate::backend::document::CellValue::Empty)
@@ -443,7 +438,7 @@ mod tests {
         state.begin_selection(0, 0, false);
         state.paste_selection("first\tsecond\nthird\tfourth");
 
-        let sheet = state.document.active_sheet().unwrap();
+        let sheet = state.document.sheet();
         assert_eq!(
             sheet.cell(0, 0).map(|cell| &cell.value),
             Some(&crate::backend::document::CellValue::Text(
@@ -475,8 +470,7 @@ mod tests {
         let mut state = AppState::new();
         state
             .document
-            .active_sheet_mut()
-            .unwrap()
+            .sheet_mut()
             .set_cell_value_with_cache(
                 0,
                 0,
@@ -491,7 +485,7 @@ mod tests {
         state.begin_selection(1, 1, false);
         state.paste_selection(&copied);
 
-        let sheet = state.document.active_sheet().unwrap();
+        let sheet = state.document.sheet();
         assert_eq!(
             sheet
                 .cell(1, 1)

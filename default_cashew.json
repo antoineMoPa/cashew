@@ -1,27 +1,25 @@
 {
-  "version": 1,
+  "version": 2,
   "title": "Untitled Cashew",
-  "sheets": [
-    {
-      "name": "Storyboard",
-      "rows": 100,
-      "cols": 26,
-      "column_widths": {
-        "0": 289
-      },
-      "row_heights": {},
-      "cells": {
-        "A1": {
-          "input": "=LLM(\"say hello\", \"google/gemini-2.5-flash\", \"\")",
-          "value": {
-            "type": "Cached",
-            "data": "Hello!"
-          },
-          "cache_key": "7a5c1cd7135a32ff48f87ba0cad95cfbf60cbc6458768995502b3221db41cee0"
-        }
+  "sheet": {
+    "name": "Storyboard",
+    "rows": 100,
+    "cols": 26,
+    "column_widths": {
+      "0": 289
+    },
+    "row_heights": {},
+    "cells": {
+      "A1": {
+        "input": "=LLM(\"say hello\", \"google/gemini-2.5-flash\", \"\")",
+        "value": {
+          "type": "Cached",
+          "data": "Hello!"
+        },
+        "cache_key": "7a5c1cd7135a32ff48f87ba0cad95cfbf60cbc6458768995502b3221db41cee0"
       }
     }
-  ],
+  },
   "cache": {
     "7a5c1cd7135a32ff48f87ba0cad95cfbf60cbc6458768995502b3221db41cee0": {
       "key": "7a5c1cd7135a32ff48f87ba0cad95cfbf60cbc6458768995502b3221db41cee0",
