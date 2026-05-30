@@ -11,20 +11,28 @@ const MENU_SHORTCUT_MODIFIER: &str = "Ctrl";
 pub(crate) fn MenuBar(mut state: Signal<AppState>) -> Element {
     let snapshot = state.read();
     let file_menu_open = snapshot.file_menu_open;
+    let edit_menu_open = snapshot.edit_menu_open;
     drop(snapshot);
 
     rsx! {
         header { class: "top-shell",
             nav { class: "menu-bar",
                 div { class: "menu-root",
+                    onmousedown: move |event| event.stop_propagation(),
+                    onmouseup: move |event| event.stop_propagation(),
                     button {
                         class: "menu-trigger",
                         onmousedown: move |event| event.stop_propagation(),
-                        onclick: move |_| state.with_mut(|state| state.file_menu_open = !state.file_menu_open),
+                        onclick: move |_| state.with_mut(|state| {
+                            state.file_menu_open = !state.file_menu_open;
+                            state.edit_menu_open = false;
+                        }),
                         "File"
                     }
                     if file_menu_open {
                         div { class: "menu-popover",
+                            onmousedown: move |event| event.stop_propagation(),
+                            onmouseup: move |event| event.stop_propagation(),
                             button { class: "menu-item", onclick: move |_| state.with_mut(AppState::new_document),
                                 span { class: "menu-item-label", "New" }
                                 span { class: "menu-shortcut", "{MENU_SHORTCUT_MODIFIER}+N" }
@@ -50,7 +58,46 @@ pub(crate) fn MenuBar(mut state: Signal<AppState>) -> Element {
                         }
                     }
                 }
-                button { class: "menu-trigger disabled", "Edit" }
+                div { class: "menu-root",
+                    onmousedown: move |event| event.stop_propagation(),
+                    onmouseup: move |event| event.stop_propagation(),
+                    button {
+                        class: "menu-trigger",
+                        onmousedown: move |event| event.stop_propagation(),
+                        onclick: move |_| state.with_mut(|state| {
+                            state.edit_menu_open = !state.edit_menu_open;
+                            state.file_menu_open = false;
+                        }),
+                        "Edit"
+                    }
+                    if edit_menu_open {
+                        div { class: "menu-popover",
+                            onmousedown: move |event| event.stop_propagation(),
+                            onmouseup: move |event| event.stop_propagation(),
+                            button { class: "menu-item", onclick: move |_| state.with_mut(|state| {
+                                state.copy_selection();
+                                state.edit_menu_open = false;
+                            }),
+                                span { class: "menu-item-label", "Copy" }
+                                span { class: "menu-shortcut", "{MENU_SHORTCUT_MODIFIER}+C" }
+                            }
+                            button { class: "menu-item", onclick: move |_| state.with_mut(|state| {
+                                state.cut_selection();
+                                state.edit_menu_open = false;
+                            }),
+                                span { class: "menu-item-label", "Cut" }
+                                span { class: "menu-shortcut", "{MENU_SHORTCUT_MODIFIER}+X" }
+                            }
+                            button { class: "menu-item", onclick: move |_| state.with_mut(|state| {
+                                state.clear_selection();
+                                state.edit_menu_open = false;
+                            }),
+                                span { class: "menu-item-label", "Clear Selection" }
+                                span { class: "menu-shortcut", "Delete" }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

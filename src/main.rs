@@ -8,6 +8,10 @@ fn main() {
         .unwrap_or_else(|| "Cashew AI Workflow Spreadsheet".to_string());
 
     dioxus::LaunchBuilder::desktop()
-        .with_cfg(Config::new().with_window(WindowBuilder::new().with_title(title)))
+        .with_cfg(
+            Config::new()
+                .with_background_color((7, 17, 31, 255))
+                .with_window(WindowBuilder::new().with_title(title)),
+        )
         .launch(frontend::App);
 }

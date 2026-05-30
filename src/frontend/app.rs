@@ -29,6 +29,8 @@ pub fn App() -> Element {
             state.resizing = None;
             state.finish_fill_drag();
             state.finish_selection();
+            state.file_menu_open = false;
+            state.edit_menu_open = false;
         });
     };
 

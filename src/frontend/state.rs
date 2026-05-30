@@ -47,6 +47,7 @@ pub(crate) struct AppState {
     pub(crate) document: CashewDocument,
     pub(crate) file_path: Option<PathBuf>,
     pub(crate) file_menu_open: bool,
+    pub(crate) edit_menu_open: bool,
     pub(crate) dirty: bool,
     pub(crate) status: String,
     pub(crate) selected_cell: (usize, usize),
@@ -144,6 +145,7 @@ impl AppState {
             document,
             file_path,
             file_menu_open: false,
+            edit_menu_open: false,
             dirty: false,
             status: settings_status
                 .or(document_status)
@@ -1158,6 +1160,7 @@ impl AppState {
         self.document = CashewDocument::default();
         self.file_path = None;
         self.file_menu_open = false;
+        self.edit_menu_open = false;
         self.dirty = false;
         self.fill_dragging = None;
         self.pending_provider_calls.clear();
@@ -1169,6 +1172,7 @@ impl AppState {
 
     pub(crate) fn open_document(&mut self) {
         self.file_menu_open = false;
+        self.edit_menu_open = false;
 
         let Some(path) = rfd::FileDialog::new()
             .add_filter("Cashew JSON", &["json"])
@@ -1196,6 +1200,7 @@ impl AppState {
 
     pub(crate) fn save_document(&mut self) {
         self.file_menu_open = false;
+        self.edit_menu_open = false;
         self.commit_formula_buffer_if_changed();
 
         let Some(path) = self.file_path.clone() else {
@@ -1208,6 +1213,7 @@ impl AppState {
 
     pub(crate) fn save_document_as(&mut self) {
         self.file_menu_open = false;
+        self.edit_menu_open = false;
         self.commit_formula_buffer_if_changed();
 
         let Some(mut path) = rfd::FileDialog::new()
@@ -1228,6 +1234,7 @@ impl AppState {
 
     pub(crate) fn open_settings(&mut self) {
         self.file_menu_open = false;
+        self.edit_menu_open = false;
         self.settings_open = true;
 
         match UserSettings::load_default() {
