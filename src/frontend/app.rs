@@ -2,14 +2,17 @@ use dioxus::prelude::Key;
 use dioxus::prelude::*;
 
 use super::components::{BottomPanel, FormulaBar, MenuBar, SettingsDialog, SheetView, StatusBar};
-use super::state::{AppState, ResizeKind};
+use super::state::{AppState, AppToast, CellInteractionMode, ResizeKind};
 
 const APP_CSS: &str = include_str!("styles.css");
 
 #[component]
 pub fn App() -> Element {
     let mut state = use_signal(AppState::new);
-    let bottom_panel_height = state.read().bottom_panel_height;
+    let snapshot = state.read();
+    let bottom_panel_height = snapshot.bottom_panel_height;
+    let toast = snapshot.toast.clone();
+    drop(snapshot);
 
     let on_mouse_move = move |event: MouseEvent| {
         let coordinates = event.client_coordinates();
@@ -53,6 +56,20 @@ pub fn App() -> Element {
                         FileShortcut::SaveAs => state.with_mut(AppState::save_document_as),
                         FileShortcut::Settings => state.with_mut(AppState::open_settings),
                     }
+                    return;
+                }
+
+                if select_all_shortcut(&event) {
+                    let should_select_all = {
+                        let snapshot = state.read();
+                        snapshot.selected_cell_mode != CellInteractionMode::FormulaEdit
+                            && !snapshot.settings_open
+                    };
+
+                    if should_select_all {
+                        event.prevent_default();
+                        state.with_mut(AppState::select_all_cells);
+                    }
                 }
             },
             MenuBar { state }
@@ -60,7 +77,25 @@ pub fn App() -> Element {
             SheetView { state }
             BottomPanel { state }
             SettingsDialog { state }
+            ToastViewport { toast }
             StatusBar { state }
+        }
+    }
+}
+
+#[component]
+fn ToastViewport(toast: Option<AppToast>) -> Element {
+    let Some(toast) = toast else {
+        return rsx! {};
+    };
+
+    rsx! {
+        div { class: "toast-viewport",
+            div {
+                key: "{toast.id}",
+                class: "app-toast",
+                "{toast.message}"
+            }
         }
     }
 }
@@ -93,4 +128,13 @@ fn file_shortcut(event: &KeyboardEvent) -> Option<FileShortcut> {
         Key::Character(value) if value == "," && !modifiers.shift() => Some(FileShortcut::Settings),
         _ => None,
     }
+}
+
+fn select_all_shortcut(event: &KeyboardEvent) -> bool {
+    let modifiers = event.modifiers();
+    if !modifiers.meta() && !modifiers.ctrl() {
+        return false;
+    }
+
+    matches!(event.key(), Key::Character(value) if value.eq_ignore_ascii_case("a"))
 }

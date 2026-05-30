@@ -25,8 +25,8 @@ use crate::backend::formulas::FormulaFunction;
 use crate::backend::providers::fal_image::{FalImageClient, GenerateImageRequest};
 use crate::backend::providers::fal_segment::{FalSegmentClient, SegmentImageRequest};
 use crate::backend::providers::fal_video::{
-    generate_video_image_inputs, generate_video_request_body_without_images, FalVideoClient,
-    GenerateVideoRequest,
+    FalVideoClient, GenerateVideoRequest, generate_video_image_inputs,
+    generate_video_request_body_without_images,
 };
 use crate::backend::providers::openrouter::{OpenRouterClient, OpenRouterRequest};
 use crate::backend::settings::{UserSettings, settings_path};
@@ -73,7 +73,9 @@ pub(crate) struct AppState {
     pub(crate) network_calls: Vec<NetworkCallRecord>,
     pub(crate) pending_provider_calls: Vec<QueuedProviderCall>,
     pub(crate) copied_cells: Option<CopiedCells>,
+    pub(crate) toast: Option<AppToast>,
     next_network_call_id: u64,
+    next_toast_id: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -127,6 +129,12 @@ pub(crate) struct NetworkCallRecord {
     pub(crate) error_message: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AppToast {
+    pub(crate) id: u64,
+    pub(crate) message: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NetworkCallStatus {
     PendingApproval,
@@ -173,7 +181,9 @@ impl AppState {
             network_calls: Vec::new(),
             pending_provider_calls: Vec::new(),
             copied_cells: None,
+            toast: None,
             next_network_call_id: 1,
+            next_toast_id: 1,
         };
         state.rebuild_pending_provider_calls_from_document();
         state
@@ -236,6 +246,20 @@ impl AppState {
         self.selected_cell_mode = CellInteractionMode::Display;
         self.completions_open = false;
         self.completion_index = 0;
+    }
+
+    pub(crate) fn formula_edit_is_active(&self) -> bool {
+        self.selected_cell_mode == CellInteractionMode::FormulaEdit
+            && self.editing_cell == Some(self.selected_cell)
+    }
+
+    pub(crate) fn commit_formula_buffer_if_active(&mut self) -> bool {
+        if !self.formula_edit_is_active() {
+            return false;
+        }
+
+        self.commit_formula_buffer();
+        true
     }
 
     pub(crate) async fn run_openrouter_for_cell(
@@ -1175,6 +1199,26 @@ impl AppState {
         self.editing_cell = Some((row, col));
     }
 
+    pub(crate) fn select_all_cells(&mut self) {
+        let sheet = self.document.sheet();
+        let end_row = sheet.rows.saturating_sub(1);
+        let end_col = sheet.cols.saturating_sub(1);
+
+        self.selection_anchor = (0, 0);
+        self.selection_end = (end_row, end_col);
+        self.selected_cell = (0, 0);
+        self.selected_cell_mode = CellInteractionMode::Display;
+        self.editing_cell = None;
+        self.refresh_formula_input_from_cell(0, 0);
+        self.completions_open = false;
+        self.completion_index = 0;
+        self.selecting = false;
+        self.status = format!(
+            "Selected {}",
+            range_label(0, 0, self.selection_end.0, self.selection_end.1)
+        );
+    }
+
     pub(crate) fn new_document(&mut self) {
         self.document = CashewDocument::default();
         self.file_path = None;
@@ -1295,6 +1339,15 @@ impl AppState {
 
     pub(crate) fn set_bottom_panel_tab(&mut self, tab: BottomPanelTab) {
         self.bottom_panel_tab = tab;
+    }
+
+    pub(crate) fn show_toast(&mut self, message: impl Into<String>) {
+        let id = self.next_toast_id;
+        self.next_toast_id = self.next_toast_id.wrapping_add(1).max(1);
+        self.toast = Some(AppToast {
+            id,
+            message: message.into(),
+        });
     }
 
     fn push_network_call(&mut self, record: NetworkCallRecord) -> u64 {
@@ -2579,6 +2632,35 @@ mod tests {
         assert_eq!(state.editing_cell, None);
         assert!(!state.completions_open);
         assert_eq!(state.completion_index, 0);
+    }
+
+    #[test]
+    fn commit_formula_buffer_is_only_active_while_editing() {
+        let mut state = AppState::new();
+        state.set_selected_formula("=SUM(".to_string());
+
+        assert!(state.formula_edit_is_active());
+        assert!(state.commit_formula_buffer_if_active());
+
+        state.finish_formula_edit();
+
+        assert!(!state.formula_edit_is_active());
+        assert!(!state.commit_formula_buffer_if_active());
+    }
+
+    #[test]
+    fn select_all_cells_targets_the_full_sheet() {
+        let mut state = AppState::new();
+        let sheet = state.document.sheet().clone();
+
+        state.select_all_cells();
+
+        assert_eq!(
+            state.selection_range(),
+            SelectionRange::new((0, 0), (sheet.rows - 1, sheet.cols - 1))
+        );
+        assert_eq!(state.selected_cell, (0, 0));
+        assert_eq!(state.selected_cell_mode, CellInteractionMode::Display);
     }
 
     #[test]

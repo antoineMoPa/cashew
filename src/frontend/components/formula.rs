@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 use crate::backend::document::cell_key;
 use crate::backend::formulas::{FormulaFunction, matching_functions};
 
-use super::super::state::{AppState, NetworkCallStatus, should_show_completions};
+use super::super::state::{AppState, should_show_completions};
 use super::sheet::{
     FormulaSegment, accept_highlighted_formula_completion, formula_reference_segments,
     map_editor_text, queue_or_spawn_provider_work, spawn_provider_work,
@@ -17,11 +17,7 @@ pub(crate) fn FormulaBar(mut state: Signal<AppState>) -> Element {
     let address = cell_key(row, col);
     let formula_input = snapshot.formula_input.clone();
     let completion_index = snapshot.completion_index;
-    let pending_provider_calls = snapshot
-        .network_calls
-        .iter()
-        .filter(|call| matches!(call.status, NetworkCallStatus::PendingApproval))
-        .count();
+    let pending_provider_calls = snapshot.pending_provider_calls.len();
     let pending_provider_calls_label = format!("Run {pending_provider_calls}");
     drop(snapshot);
     let formula_matches = matching_functions(&formula_input);
@@ -72,9 +68,16 @@ pub(crate) fn FormulaBar(mut state: Signal<AppState>) -> Element {
                         state.completions_open = should_show_completions(&state.formula_input);
                     }),
                     onblur: move |_| {
-                        state.with_mut(|state| state.commit_formula_buffer());
-                        let (row, col) = state.read().selected_cell;
-                        queue_or_spawn_provider_work(state, row, col);
+                        let queued_cell = state.with_mut(|state| {
+                            if !state.commit_formula_buffer_if_active() {
+                                return None;
+                            }
+
+                            Some(state.selected_cell)
+                        });
+                        if let Some((row, col)) = queued_cell {
+                            queue_or_spawn_provider_work(state, row, col);
+                        }
                     },
                     onkeydown: move |event| {
                         let matches = matching_functions(&state.read().formula_input);

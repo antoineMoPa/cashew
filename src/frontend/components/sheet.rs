@@ -505,8 +505,10 @@ fn CellEditor(
                 });
             },
             onblur: move |_| {
-                state.with_mut(|state| state.commit_formula_buffer());
-                queue_or_spawn_provider_work(state, row, col);
+                let should_queue = state.with_mut(|state| state.commit_formula_buffer_if_active());
+                if should_queue {
+                    queue_or_spawn_provider_work(state, row, col);
+                }
             },
             onkeydown: move |event| {
                 handle_cell_keydown(state, event, row, col);

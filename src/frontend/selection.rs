@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::backend::{
     cache::{CacheStatus, CachedValue},
     document::{CashewDocument, Cell, CellValue, cell_key},
@@ -16,7 +18,9 @@ pub(crate) struct SelectionRange {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CopiedCells {
     text: String,
-    rows: Vec<Vec<Option<Cell>>>,
+    row_count: usize,
+    col_count: usize,
+    cells: BTreeMap<(usize, usize), Cell>,
 }
 
 impl SelectionRange {
@@ -116,16 +120,20 @@ impl AppState {
             && range.start_col == range.end_col
             && self.selected_cell_mode == CellInteractionMode::Value
         {
-            let copied_rows = vec![vec![
-                sheet
-                    .cell(range.start_row, range.start_col)
-                    .cloned()
-                    .map(strip_spill_metadata),
-            ]];
+            let mut cells = BTreeMap::new();
+            if let Some(cell) = sheet
+                .cell(range.start_row, range.start_col)
+                .cloned()
+                .map(strip_spill_metadata)
+            {
+                cells.insert((0, 0), cell);
+            }
             let text = cell_value_for_copy(&self.document, range.start_row, range.start_col);
             self.copied_cells = Some(CopiedCells {
                 text: text.clone(),
-                rows: copied_rows,
+                row_count: 1,
+                col_count: 1,
+                cells,
             });
             self.status = format!(
                 "Copied value from {}",
@@ -134,29 +142,38 @@ impl AppState {
             return text;
         }
 
-        let copied_rows = (range.start_row..=range.end_row)
-            .map(|row| {
-                (range.start_col..=range.end_col)
-                    .map(|col| sheet.cell(row, col).cloned().map(strip_spill_metadata))
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        let cells = copied_rows
-            .iter()
-            .map(|row| {
-                row.iter()
-                    .map(|cell| {
-                        cell.as_ref()
-                            .map(|cell| cell.input.clone())
-                            .unwrap_or_default()
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        let text = cells_to_tsv(&cells);
+        let row_count = range.end_row - range.start_row + 1;
+        let col_count = range.end_col - range.start_col + 1;
+        let mut copied_rows = Vec::with_capacity(row_count);
+        let mut copied_cells = BTreeMap::new();
+
+        for row_offset in 0..row_count {
+            let row = range.start_row + row_offset;
+            let mut copied_row = Vec::with_capacity(col_count);
+
+            for col_offset in 0..col_count {
+                let col = range.start_col + col_offset;
+                let cell = sheet.cell(row, col).cloned().map(strip_spill_metadata);
+                copied_row.push(
+                    cell.as_ref()
+                        .map(|cell| cell.input.clone())
+                        .unwrap_or_default(),
+                );
+
+                if let Some(cell) = cell {
+                    copied_cells.insert((row_offset, col_offset), cell);
+                }
+            }
+
+            copied_rows.push(copied_row);
+        }
+
+        let text = cells_to_tsv(&copied_rows);
         self.copied_cells = Some(CopiedCells {
             text: text.clone(),
-            rows: copied_rows,
+            row_count,
+            col_count,
+            cells: copied_cells,
         });
         self.status = format!(
             "Copied {}",
@@ -269,8 +286,8 @@ impl AppState {
         };
         let (start_row, start_col) = self.selected_cell;
 
-        let row_count = copied.rows.len();
-        let col_count = copied.rows.iter().map(Vec::len).max().unwrap_or(0);
+        let row_count = copied.row_count;
+        let col_count = copied.col_count;
         if row_count == 0 || col_count == 0 {
             self.paste_selection("");
             return;
@@ -282,14 +299,19 @@ impl AppState {
         );
 
         let sheet = self.document.sheet_mut();
-        for (row_offset, row_values) in copied.rows.into_iter().enumerate() {
-            for (col_offset, cell) in row_values.into_iter().enumerate() {
+        for row_offset in 0..row_count {
+            for col_offset in 0..col_count {
+                let cell = copied
+                    .cells
+                    .get(&(row_offset, col_offset))
+                    .cloned()
+                    .map(strip_spill_metadata);
                 let row = start_row + row_offset;
                 let col = start_col + col_offset;
                 sheet.ensure_size(row + 1, col + 1);
                 sheet.cells.insert(
                     cell_key(row, col),
-                    cell.map(strip_spill_metadata).unwrap_or(Cell {
+                    cell.unwrap_or(Cell {
                         input: String::new(),
                         value: CellValue::Empty,
                         cache_key: None,
@@ -508,6 +530,30 @@ mod tests {
                 &CellValue::Cached("cached answer".to_string()),
                 Some("cache-key")
             ))
+        );
+    }
+
+    #[test]
+    fn copy_selection_stores_only_populated_cells() {
+        let mut state = AppState::new();
+        state.set_cell_input(0, 0, "first".to_string());
+        state.begin_selection(0, 0, false);
+        state.extend_selection(1, 1);
+        state.finish_selection();
+
+        state.copy_selection();
+
+        let copied = state
+            .copied_cells
+            .as_ref()
+            .expect("selection should be copied");
+        assert_eq!(copied.row_count, 2);
+        assert_eq!(copied.col_count, 2);
+        assert_eq!(copied.cells.len(), 1);
+        assert!(copied.cells.contains_key(&(0, 0)));
+        assert_eq!(
+            copied.cells.get(&(0, 0)).map(|cell| cell.input.as_str()),
+            Some("first")
         );
     }
 

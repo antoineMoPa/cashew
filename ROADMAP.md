@@ -28,6 +28,7 @@ Easy
 
 ## Features
 
+- HuggingFace inference (as alternative to fal)
 - Image file insertion (insert menu > image)
 - Image file copy pasting from anywhere
 - 3D model viewing in cells

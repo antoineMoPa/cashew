@@ -1,4 +1,5 @@
 use dioxus::prelude::*;
+use dioxus_free_icons::{Icon, icons::md_content_icons::MdContentCopy};
 
 use crate::backend::formulas::{
     FORMULA_FUNCTIONS, FormulaFunction, FormulaModelDoc, formula_example_for_function,
@@ -12,6 +13,7 @@ use super::super::state::{
 
 #[component]
 pub(crate) fn BottomPanel(mut state: Signal<AppState>) -> Element {
+    let selected_doc_function = use_signal(|| None::<FormulaFunction>);
     let snapshot = state.read();
     let active_tab = snapshot.bottom_panel_tab;
     let formula_input = snapshot.formula_input.clone();
@@ -54,7 +56,7 @@ pub(crate) fn BottomPanel(mut state: Signal<AppState>) -> Element {
             div { class: "bottom-panel-body",
                 match active_tab {
                     BottomPanelTab::FunctionDocs => rsx! {
-                        DocsPanel { state, formula_input }
+                        DocsPanel { state, selected_doc_function, formula_input }
                     },
                     BottomPanelTab::NetworkCalls => rsx! {
                         NetworkCallsPanel { calls }
@@ -83,15 +85,39 @@ fn TabButton(label: &'static str, active: bool, onclick: EventHandler<MouseEvent
 }
 
 #[component]
-fn DocsPanel(mut state: Signal<AppState>, formula_input: String) -> Element {
+fn DocsPanel(
+    state: Signal<AppState>,
+    mut selected_doc_function: Signal<Option<FormulaFunction>>,
+    formula_input: String,
+) -> Element {
     if formula_input.trim().is_empty() {
-        return rsx! { AllDocsPanel {} };
+        if let Some(function) = *selected_doc_function.read() {
+            return rsx! {
+                FunctionDocsPanel {
+                    state,
+                    function,
+                    on_navigate: move |function| selected_doc_function.set(Some(function)),
+                }
+            };
+        }
+
+        return rsx! {
+            AllDocsPanel {
+                on_navigate: move |function| selected_doc_function.set(Some(function)),
+            }
+        };
     }
 
     let function = function_for_formula_input(&formula_input);
 
     if let Some(function) = function {
-        return rsx! { FunctionDocsPanel { function } };
+        return rsx! {
+            FunctionDocsPanel {
+                state,
+                function,
+                on_navigate: move |function| selected_doc_function.set(Some(function)),
+            }
+        };
     }
 
     let matches = matching_functions(&formula_input);
@@ -104,14 +130,20 @@ fn DocsPanel(mut state: Signal<AppState>, formula_input: String) -> Element {
         };
     }
 
-    rsx! { DocsCompletionsPanel { state, formula_input, matches } }
+    rsx! {
+        DocsCompletionsPanel {
+            formula_input,
+            matches,
+            on_navigate: move |function| selected_doc_function.set(Some(function)),
+        }
+    }
 }
 
 #[component]
 fn DocsCompletionsPanel(
-    mut state: Signal<AppState>,
     formula_input: String,
     matches: Vec<FormulaFunction>,
+    on_navigate: EventHandler<FormulaFunction>,
 ) -> Element {
     rsx! {
         div { class: "function-docs",
@@ -131,7 +163,7 @@ fn DocsCompletionsPanel(
                             event.stop_propagation();
                         },
                         onclick: move |_| {
-                            state.with_mut(|state| state.insert_formula(function));
+                            on_navigate.call(function);
                         },
                         div { class: "doc-card-head",
                             div { class: "doc-card-title", "{function.name}" }
@@ -147,7 +179,11 @@ fn DocsCompletionsPanel(
 }
 
 #[component]
-fn FunctionDocsPanel(function: FormulaFunction) -> Element {
+fn FunctionDocsPanel(
+    state: Signal<AppState>,
+    function: FormulaFunction,
+    on_navigate: EventHandler<FormulaFunction>,
+) -> Element {
     let models = models_for_function(function);
     let related = related_functions_for_function(function);
     let selected_model = use_signal(|| None::<String>);
@@ -170,14 +206,17 @@ fn FunctionDocsPanel(function: FormulaFunction) -> Element {
                     div { class: "doc-title", "{function.name}" }
                     div { class: "doc-summary", "{function.summary}" }
                 }
-                code { class: "doc-signature", "{example_formula}" }
+                div { class: "doc-signature-row",
+                    pre { class: "doc-signature", "{example_formula}" }
+                    CopyFormulaButton { state, text: example_formula.clone() }
+                }
             }
             div { class: "doc-grid",
                 DocArguments { function }
                 DocModels { selected_model, active_model_id, models }
                 div { class: "doc-side-sections",
                     DocNotes { function }
-                    DocSeeAlso { related }
+                    DocSeeAlso { related, on_navigate }
                 }
             }
         }
@@ -185,7 +224,73 @@ fn FunctionDocsPanel(function: FormulaFunction) -> Element {
 }
 
 #[component]
-fn DocSeeAlso(related: Vec<FormulaFunction>) -> Element {
+fn CopyFormulaButton(mut state: Signal<AppState>, text: String) -> Element {
+    rsx! {
+        div { class: "doc-copy-control",
+            button {
+                class: "doc-signature-copy",
+                title: "Copy formula",
+                onmousedown: move |event| {
+                    event.prevent_default();
+                    event.stop_propagation();
+                },
+                onclick: move |event| {
+                    event.stop_propagation();
+                    copy_text_to_clipboard(text.clone());
+                    state.with_mut(|state| state.show_toast("Formula copied"));
+                },
+                Icon {
+                    icon: MdContentCopy,
+                    width: 18,
+                    height: 18,
+                    fill: "currentColor",
+                }
+                span { class: "sr-only", "Copy formula" }
+            }
+        }
+    }
+}
+
+fn copy_text_to_clipboard(text: String) {
+    let Ok(text_json) = serde_json::to_string(&text) else {
+        return;
+    };
+    let script = format!(
+        r#"
+        const text = {text_json};
+        if (navigator.clipboard && navigator.clipboard.writeText) {{
+            navigator.clipboard.writeText(text).catch(() => {{
+                const textarea = document.createElement("textarea");
+                textarea.value = text;
+                textarea.style.position = "fixed";
+                textarea.style.opacity = "0";
+                document.body.appendChild(textarea);
+                textarea.focus();
+                textarea.select();
+                document.execCommand("copy");
+                textarea.remove();
+            }});
+        }} else {{
+            const textarea = document.createElement("textarea");
+            textarea.value = text;
+            textarea.style.position = "fixed";
+            textarea.style.opacity = "0";
+            document.body.appendChild(textarea);
+            textarea.focus();
+            textarea.select();
+            document.execCommand("copy");
+            textarea.remove();
+        }}
+        "#
+    );
+    let _ = dioxus::document::eval(&script);
+}
+
+#[component]
+fn DocSeeAlso(
+    related: Vec<FormulaFunction>,
+    on_navigate: EventHandler<FormulaFunction>,
+) -> Element {
     rsx! {
         section { class: "doc-section",
             h3 { "See Also" }
@@ -194,7 +299,13 @@ fn DocSeeAlso(related: Vec<FormulaFunction>) -> Element {
             } else {
                 div { class: "see-also-list",
                     for function in related {
-                        div { class: "see-also-item",
+                        button {
+                            class: "see-also-item",
+                            onmousedown: move |event| {
+                                event.prevent_default();
+                                event.stop_propagation();
+                            },
+                            onclick: move |_| on_navigate.call(function),
                             code { "{function.name}" }
                             div { class: "doc-description", "{function.summary}" }
                         }
@@ -206,7 +317,7 @@ fn DocSeeAlso(related: Vec<FormulaFunction>) -> Element {
 }
 
 #[component]
-fn AllDocsPanel() -> Element {
+fn AllDocsPanel(on_navigate: EventHandler<FormulaFunction>) -> Element {
     rsx! {
         div { class: "function-docs",
             div { class: "doc-header",
@@ -218,7 +329,13 @@ fn AllDocsPanel() -> Element {
             }
             div { class: "doc-index",
                 for function in FORMULA_FUNCTIONS {
-                    article { class: "doc-card",
+                    button {
+                        class: "doc-card doc-nav-card",
+                        onmousedown: move |event| {
+                            event.prevent_default();
+                            event.stop_propagation();
+                        },
+                        onclick: move |_| on_navigate.call(*function),
                         div { class: "doc-card-head",
                             div { class: "doc-card-title", "{function.name}" }
                             code { class: "doc-card-signature", "{function.signature}" }

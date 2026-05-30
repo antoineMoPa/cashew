@@ -626,7 +626,9 @@ pub fn generate_video_request_for_sheet(
     let supports_aspect_ratio = model
         .as_deref()
         .map(video_model_supports_aspect_ratio)
-        .unwrap_or_else(|| video_model_supports_aspect_ratio(crate::backend::providers::fal_video::DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            video_model_supports_aspect_ratio(crate::backend::providers::fal_video::DEFAULT_MODEL)
+        });
 
     let mut duration = None;
     let mut aspect_ratio = None;
@@ -636,10 +638,7 @@ pub fn generate_video_request_for_sheet(
             duration = Some(parsed);
             if let Some(second) = remaining.get(1) {
                 if !supports_aspect_ratio {
-                    return Err(
-                        "GENERATEVIDEO model does not accept an aspect ratio"
-                            .to_string(),
-                    );
+                    return Err("GENERATEVIDEO model does not accept an aspect ratio".to_string());
                 }
                 aspect_ratio = Some(second.clone());
                 if remaining.len() > 2 {
@@ -662,16 +661,9 @@ pub fn generate_video_request_for_sheet(
         }
     }
 
-    GenerateVideoRequest::new(
-        prompt,
-        start_image_url,
-        None,
-        model,
-        duration,
-        aspect_ratio,
-    )
-    .map(Some)
-    .map_err(|error| error.to_string())
+    GenerateVideoRequest::new(prompt, start_image_url, None, model, duration, aspect_ratio)
+        .map(Some)
+        .map_err(|error| error.to_string())
 }
 
 pub fn concatenate_video_inputs_for_sheet(
@@ -1707,10 +1699,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(
-            error
-                .contains("require the end image immediately before the model")
-        );
+        assert!(error.contains("require the end image immediately before the model"));
     }
 
     #[test]

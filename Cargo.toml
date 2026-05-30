@@ -8,6 +8,7 @@ anyhow = "1"
 base64 = "0.22"
 dioxus = { version = "0.7.9", features = ["desktop"] }
 dioxus-cli-config = "0.7.9"
+dioxus-free-icons = { version = "0.10.0", features = ["material-design-icons-content"] }
 rfd = "0.14"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
