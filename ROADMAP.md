@@ -29,6 +29,7 @@ Easy
 ## Features
 
 - Image file insertion (insert menu > image)
+- Image file copy pasting from anywhere
 - 3D model viewing in cells
 - Gaussian splat formulas + viewing + manipulation
 - 3d pipeline formulas (ex: voxelify, remesh, etc.)
@@ -36,3 +37,16 @@ Easy
 - Scripting / User defined formulas
  - js-like scripting with formula calls, http requests, etc.
 - sound playback
+- update current formula when changing models in docs
+
+
+## Papercuts
+ - triple click formula in docs selects page content - should select just <pre/
+ - CMD+A in the sheet should select all cells rather than the current behaviour to select
+  all html content
+ - editing a formula causes run button to increment (should only compute once)
+
+## Code cleanup
+
+ - formula implementations file is getting too big
+ -

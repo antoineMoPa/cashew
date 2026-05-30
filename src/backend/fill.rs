@@ -353,7 +353,10 @@ pub fn formula_references(input: &str) -> Vec<FormulaReference> {
     formula_references_for_expression(&trimmed_start[1..], expression_start)
 }
 
-fn formula_references_for_expression(expression: &str, expression_start: usize) -> Vec<FormulaReference> {
+fn formula_references_for_expression(
+    expression: &str,
+    expression_start: usize,
+) -> Vec<FormulaReference> {
     let mut references = Vec::new();
     let mut index = 0;
 
@@ -385,10 +388,7 @@ fn formula_references_for_expression(expression: &str, expression_start: usize) 
     references
 }
 
-fn rewrite_formula_expression<F>(
-    expression: &str,
-    mut map_reference: F,
-) -> Result<String, String>
+fn rewrite_formula_expression<F>(expression: &str, mut map_reference: F) -> Result<String, String>
 where
     F: FnMut(CellReferenceParts, usize) -> Result<String, String>,
 {
@@ -452,7 +452,11 @@ fn offset_horizontal_formula_pattern(
     let target_offset = target_col as isize - source.start_col as isize;
     let rewritten = rewrite_formula_expression(expression, |reference, reference_index| {
         let Some(Some(step)) = reference_steps.get(reference_index) else {
-            return shift_reference(reference, 0, target_col as isize - source.start_col as isize);
+            return shift_reference(
+                reference,
+                0,
+                target_col as isize - source.start_col as isize,
+            );
         };
 
         let row = if reference.row_absolute {
@@ -485,7 +489,8 @@ fn offset_horizontal_formula_pattern(
 fn horizontal_reference_steps(sheet: &Sheet, source: FillRange) -> Vec<Option<ReferenceStep>> {
     let references_by_cell = (source.start_col..=source.end_col)
         .map(|col| {
-            sheet.cell(source.start_row, col)
+            sheet
+                .cell(source.start_row, col)
                 .map(|cell| reference_parts_for_formula(&cell.input))
                 .unwrap_or_default()
         })
@@ -502,15 +507,15 @@ fn horizontal_reference_steps(sheet: &Sheet, source: FillRange) -> Vec<Option<Re
             let row_step = second.row as isize - first.row as isize;
             let col_step = second.col as isize - first.col as isize;
 
-            let has_consistent_step = references_by_cell
-                .windows(2)
-                .all(|pair| match (pair[0].get(reference_index), pair[1].get(reference_index)) {
+            let has_consistent_step = references_by_cell.windows(2).all(|pair| {
+                match (pair[0].get(reference_index), pair[1].get(reference_index)) {
                     (Some(previous), Some(current)) => {
                         current.row as isize - previous.row as isize == row_step
                             && current.col as isize - previous.col as isize == col_step
                     }
                     _ => false,
-                });
+                }
+            });
 
             has_consistent_step.then_some(ReferenceStep {
                 first_row: first.row,

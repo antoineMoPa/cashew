@@ -58,5 +58,35 @@
     "supports_aspect_ratio": false,
     "default_aspect_ratio": null,
     "allowed_aspect_ratios": []
+  },
+  {
+    "id": "fal-ai/kling-video/o1/standard/image-to-video",
+    "label": "Kling O1 Standard First-Frame Last-Frame",
+    "description": "Standard Kling O1 image-to-video. Animates between a start frame and an end frame using prompt guidance.",
+    "default": false,
+    "queue_api_base": "https://queue.fal.run",
+    "input_image_field": "start_and_end_image_url",
+    "duration_format": "plain",
+    "min_duration": 3,
+    "max_duration": 10,
+    "default_duration": 5,
+    "supports_aspect_ratio": false,
+    "default_aspect_ratio": null,
+    "allowed_aspect_ratios": []
+  },
+  {
+    "id": "fal-ai/kling-video/o1/image-to-video",
+    "label": "Kling O1 Pro First-Frame Last-Frame",
+    "description": "Pro Kling O1 image-to-video. Animates between a start frame and an end frame with stronger scene control.",
+    "default": false,
+    "queue_api_base": "https://queue.fal.run",
+    "input_image_field": "start_and_end_image_url",
+    "duration_format": "plain",
+    "min_duration": 3,
+    "max_duration": 10,
+    "default_duration": 5,
+    "supports_aspect_ratio": false,
+    "default_aspect_ratio": null,
+    "allowed_aspect_ratios": []
   }
 ]

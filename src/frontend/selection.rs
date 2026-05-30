@@ -116,10 +116,12 @@ impl AppState {
             && range.start_col == range.end_col
             && self.selected_cell_mode == CellInteractionMode::Value
         {
-            let copied_rows = vec![vec![sheet
-                .cell(range.start_row, range.start_col)
-                .cloned()
-                .map(strip_spill_metadata)]];
+            let copied_rows = vec![vec![
+                sheet
+                    .cell(range.start_row, range.start_col)
+                    .cloned()
+                    .map(strip_spill_metadata),
+            ]];
             let text = cell_value_for_copy(&self.document, range.start_row, range.start_col);
             self.copied_cells = Some(CopiedCells {
                 text: text.clone(),
@@ -482,16 +484,13 @@ mod tests {
     #[test]
     fn paste_selection_preserves_internal_copied_cached_cell() {
         let mut state = AppState::new();
-        state
-            .document
-            .sheet_mut()
-            .set_cell_value_with_cache(
-                0,
-                0,
-                "=LLM(A2)".to_string(),
-                CellValue::Cached("cached answer".to_string()),
-                Some("cache-key".to_string()),
-            );
+        state.document.sheet_mut().set_cell_value_with_cache(
+            0,
+            0,
+            "=LLM(A2)".to_string(),
+            CellValue::Cached("cached answer".to_string()),
+            Some("cache-key".to_string()),
+        );
 
         state.begin_selection(0, 0, false);
         let copied = state.copy_selection();

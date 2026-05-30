@@ -52,6 +52,7 @@ enum InputImageField {
     ImageUrl,
     ImageUrls,
     StartImageUrl,
+    StartAndEndImageUrl,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -90,7 +91,9 @@ pub struct VideoModelDoc {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GenerateVideoRequest {
     pub prompt: String,
-    pub image_url: String,
+    pub start_image_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_image_url: Option<String>,
     pub model: String,
     pub duration: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -148,6 +151,40 @@ fn video_model_spec(model: &str) -> Option<&'static VideoModelSpec> {
 
 pub fn video_model_id_is_supported(model: &str) -> bool {
     video_model_spec(model.trim()).is_some()
+}
+
+pub fn video_model_requires_end_image(model: &str) -> bool {
+    video_model_spec(model.trim())
+        .is_some_and(|spec| matches!(spec.input_image_field, InputImageField::StartAndEndImageUrl))
+}
+
+pub fn video_model_supports_aspect_ratio(model: &str) -> bool {
+    video_model_spec(model.trim()).is_some_and(|spec| spec.supports_aspect_ratio)
+}
+
+pub fn video_model_default_duration(model: &str) -> Option<u32> {
+    video_model_spec(model.trim()).map(|spec| spec.default_duration)
+}
+
+pub fn generate_video_image_inputs(request: &GenerateVideoRequest) -> Vec<String> {
+    let mut images = vec![request.start_image_url.clone()];
+    if let Some(end_image_url) = &request.end_image_url {
+        images.push(end_image_url.clone());
+    }
+    images
+}
+
+pub fn generate_video_request_body_without_images(request: &GenerateVideoRequest) -> Value {
+    let mut sanitized = request.input.clone();
+    if let Some(object) = sanitized.as_object_mut() {
+        if let Some(value) = object.get_mut("start_image_url") {
+            *value = Value::String("<shown in Images>".to_string());
+        }
+        if let Some(value) = object.get_mut("end_image_url") {
+            *value = Value::String("<shown in Images>".to_string());
+        }
+    }
+    sanitized
 }
 
 pub fn video_model_docs() -> Vec<VideoModelDoc> {
@@ -288,16 +325,20 @@ fn body_excerpt(body: &str) -> String {
 impl GenerateVideoRequest {
     pub fn new(
         prompt: impl Into<String>,
-        image_url: impl Into<String>,
+        start_image_url: impl Into<String>,
+        end_image_url: Option<String>,
         model: Option<String>,
         duration: Option<u32>,
         aspect_ratio: Option<String>,
     ) -> anyhow::Result<Self> {
         let prompt = prompt.into();
-        let image_url = image_url.into().trim().to_string();
-        if image_url.is_empty() {
+        let start_image_url = start_image_url.into().trim().to_string();
+        if start_image_url.is_empty() {
             anyhow::bail!("GENERATEVIDEO requires a source image URL or data URI");
         }
+        let end_image_url = end_image_url
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
 
         let model = model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
         let spec = video_model_spec(&model).ok_or_else(|| {
@@ -319,6 +360,46 @@ impl GenerateVideoRequest {
                 spec.min_duration,
                 spec.max_duration
             );
+        }
+
+        if matches!(spec.input_image_field, InputImageField::StartAndEndImageUrl) {
+            let end_image_url = end_image_url.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "GENERATEVIDEO model {} requires a second image as the end frame",
+                    spec.id
+                )
+            })?;
+
+            if aspect_ratio.is_some() {
+                anyhow::bail!(
+                    "GENERATEVIDEO model {} does not accept an aspect ratio",
+                    spec.id
+                );
+            }
+
+            let duration_value = match spec.duration_format {
+                DurationFormat::Plain => serde_json::Value::String(duration.to_string()),
+                DurationFormat::SuffixS => serde_json::Value::String(format!("{duration}s")),
+            };
+
+            let input = json!({
+                "prompt": prompt,
+                "duration": duration_value,
+                "start_image_url": serde_json::Value::String(start_image_url.clone()),
+                "end_image_url": serde_json::Value::String(end_image_url.clone()),
+            });
+
+            return Ok(Self {
+                prompt,
+                start_image_url,
+                end_image_url: Some(end_image_url),
+                model: spec.id.clone(),
+                duration,
+                aspect_ratio: None,
+                endpoint: spec.id.clone(),
+                queue_api_base: spec.queue_api_base.clone(),
+                input,
+            });
         }
 
         let aspect_ratio = if spec.supports_aspect_ratio {
@@ -355,22 +436,37 @@ impl GenerateVideoRequest {
             input["aspect_ratio"] = serde_json::Value::String(aspect_ratio.clone());
         }
 
+        if end_image_url.is_some() {
+            anyhow::bail!(
+                "GENERATEVIDEO model {} does not accept a second image",
+                spec.id
+            );
+        }
+
         match spec.input_image_field {
             InputImageField::ImageUrl => {
-                input["image_url"] = serde_json::Value::String(image_url.clone());
+                input["image_url"] = serde_json::Value::String(start_image_url.clone());
             }
             InputImageField::ImageUrls => {
-                input["image_urls"] =
-                    serde_json::Value::Array(vec![serde_json::Value::String(image_url.clone())]);
+                input["image_urls"] = serde_json::Value::Array(vec![serde_json::Value::String(
+                    start_image_url.clone(),
+                )]);
             }
             InputImageField::StartImageUrl => {
-                input["start_image_url"] = serde_json::Value::String(image_url.clone());
+                input["start_image_url"] = serde_json::Value::String(start_image_url.clone());
+            }
+            InputImageField::StartAndEndImageUrl => {
+                anyhow::bail!(
+                    "GENERATEVIDEO model {} requires a second image as the end frame",
+                    spec.id
+                );
             }
         }
 
         Ok(Self {
             prompt,
-            image_url,
+            start_image_url,
+            end_image_url: None,
             model: spec.id.clone(),
             duration,
             aspect_ratio,
@@ -393,6 +489,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -412,6 +509,7 @@ mod tests {
         let request = GenerateVideoRequest::new(
             "Animate it",
             "https://example.com/input.png",
+            None,
             Some("fal-ai/kling-video/v3/standard/image-to-video".to_string()),
             Some(10),
             Some("16:9".to_string()),
@@ -431,10 +529,39 @@ mod tests {
     }
 
     #[test]
+    fn builds_kling_first_last_frame_request() {
+        let request = GenerateVideoRequest::new(
+            "Animate it",
+            "https://example.com/start.png",
+            Some("https://example.com/end.png".to_string()),
+            Some("fal-ai/kling-video/o1/standard/image-to-video".to_string()),
+            Some(5),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            request.endpoint,
+            "fal-ai/kling-video/o1/standard/image-to-video"
+        );
+        assert_eq!(
+            request.input["start_image_url"],
+            "https://example.com/start.png"
+        );
+        assert_eq!(
+            request.input["end_image_url"],
+            "https://example.com/end.png"
+        );
+        assert_eq!(request.input["duration"], "5");
+        assert!(request.input.get("aspect_ratio").is_none());
+    }
+
+    #[test]
     fn rejects_invalid_duration_for_model() {
         let error = GenerateVideoRequest::new(
             "Animate it",
             "https://example.com/input.png",
+            None,
             Some("fal-ai/veo3.1/reference-to-video".to_string()),
             Some(12),
             None,

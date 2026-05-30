@@ -24,7 +24,10 @@ use crate::backend::formula_implementations::{
 use crate::backend::formulas::FormulaFunction;
 use crate::backend::providers::fal_image::{FalImageClient, GenerateImageRequest};
 use crate::backend::providers::fal_segment::{FalSegmentClient, SegmentImageRequest};
-use crate::backend::providers::fal_video::{FalVideoClient, GenerateVideoRequest};
+use crate::backend::providers::fal_video::{
+    generate_video_image_inputs, generate_video_request_body_without_images, FalVideoClient,
+    GenerateVideoRequest,
+};
 use crate::backend::providers::openrouter::{OpenRouterClient, OpenRouterRequest};
 use crate::backend::settings::{UserSettings, settings_path};
 
@@ -192,7 +195,9 @@ impl AppState {
     pub(crate) fn set_cell_input(&mut self, row: usize, col: usize, value: String) {
         self.ensure_work_area(row + GROWTH_BUFFER_ROWS, col + GROWTH_BUFFER_COLS);
 
-        self.document.sheet_mut().set_cell_input(row, col, value.clone());
+        self.document
+            .sheet_mut()
+            .set_cell_input(row, col, value.clone());
         self.dirty = true;
         self.status = format!("Edited {}", cell_key(row, col));
 
@@ -247,14 +252,7 @@ impl AppState {
         state.with_mut(|state| {
             let error_message = result.as_ref().err().map(ToString::to_string);
             state.finish_network_call(network_call_id, result.is_ok(), error_message);
-            state.finish_openrouter_for_cell(
-                row,
-                col,
-                input,
-                cache_key,
-                request,
-                result,
-            );
+            state.finish_openrouter_for_cell(row, col, input, cache_key, request, result);
         });
     }
 
@@ -369,7 +367,10 @@ impl AppState {
                     self.prepare_segment_for_cell_internal(row, col, true)
                         .map(ProviderWork::Segment)
                 })
-                .or_else(|| self.prepare_llm_for_cell_internal(row, col).map(ProviderWork::Llm))
+                .or_else(|| {
+                    self.prepare_llm_for_cell_internal(row, col)
+                        .map(ProviderWork::Llm)
+                })
                 .or_else(|| {
                     self.prepare_concatenate_video_for_cell_internal(row, col)
                         .map(ProviderWork::ConcatenateVideo)
@@ -479,9 +480,13 @@ impl AppState {
             Ok(Some(request)) => request,
             Ok(None) => return None,
             Err(error) => {
-                self.document
-                    .sheet_mut()
-                    .set_cell_value_with_cache(row, col, input, CellValue::Error(error), None);
+                self.document.sheet_mut().set_cell_value_with_cache(
+                    row,
+                    col,
+                    input,
+                    CellValue::Error(error),
+                    None,
+                );
                 self.dirty = true;
                 return None;
             }
@@ -560,9 +565,13 @@ impl AppState {
             Ok(Some(request)) => request,
             Ok(None) => return None,
             Err(error) => {
-                self.document
-                    .sheet_mut()
-                    .set_cell_value_with_cache(row, col, input, CellValue::Error(error), None);
+                self.document.sheet_mut().set_cell_value_with_cache(
+                    row,
+                    col,
+                    input,
+                    CellValue::Error(error),
+                    None,
+                );
                 self.dirty = true;
                 return None;
             }
@@ -641,9 +650,13 @@ impl AppState {
             Ok(Some(request)) => request,
             Ok(None) => return None,
             Err(error) => {
-                self.document
-                    .sheet_mut()
-                    .set_cell_value_with_cache(row, col, input, CellValue::Error(error), None);
+                self.document.sheet_mut().set_cell_value_with_cache(
+                    row,
+                    col,
+                    input,
+                    CellValue::Error(error),
+                    None,
+                );
                 self.dirty = true;
                 return None;
             }
@@ -720,9 +733,13 @@ impl AppState {
             Ok(Some(video_inputs)) => video_inputs,
             Ok(None) => return None,
             Err(error) => {
-                self.document
-                    .sheet_mut()
-                    .set_cell_value_with_cache(row, col, input, CellValue::Error(error), None);
+                self.document.sheet_mut().set_cell_value_with_cache(
+                    row,
+                    col,
+                    input,
+                    CellValue::Error(error),
+                    None,
+                );
                 self.dirty = true;
                 return None;
             }
@@ -1057,7 +1074,9 @@ impl AppState {
         }
 
         let sheet = self.document.sheet_mut();
-        for (row, col, minimum_column_width, minimum_row_height, media_dimensions) in planned_resizes {
+        for (row, col, minimum_column_width, minimum_row_height, media_dimensions) in
+            planned_resizes
+        {
             resize_media_cell(
                 sheet,
                 row,
@@ -1310,12 +1329,16 @@ impl AppState {
         match resizing.kind {
             ResizeKind::Column => {
                 let width = size.max(MIN_COLUMN_WIDTH).min(u16::MAX as i32) as u16;
-                self.document.sheet_mut().set_column_width(resizing.index, width);
+                self.document
+                    .sheet_mut()
+                    .set_column_width(resizing.index, width);
                 self.dirty = true;
             }
             ResizeKind::Row => {
                 let height = size.max(MIN_ROW_HEIGHT).min(u16::MAX as i32) as u16;
-                self.document.sheet_mut().set_row_height(resizing.index, height);
+                self.document
+                    .sheet_mut()
+                    .set_row_height(resizing.index, height);
                 self.dirty = true;
             }
             ResizeKind::BottomPanel => {
@@ -1520,8 +1543,8 @@ impl NetworkCallRecord {
                 request.endpoint
             ),
             status,
-            request_body: request_body_without_images(&request.input),
-            image_inputs: image_inputs_from_body(&request.input),
+            request_body: generate_video_request_body_without_images(request),
+            image_inputs: generate_video_image_inputs(request),
             error_message: None,
         }
     }
@@ -1554,14 +1577,7 @@ impl NetworkCallRecord {
 impl AppState {
     fn start_pending_provider_work(&mut self, work: &ProviderWork) {
         match work {
-            ProviderWork::Llm((
-                row,
-                col,
-                input,
-                cache_key,
-                request,
-                network_call_id,
-            )) => {
+            ProviderWork::Llm((row, col, input, cache_key, request, network_call_id)) => {
                 self.document.sheet_mut().set_cell_value_with_cache(
                     *row,
                     *col,
@@ -1573,14 +1589,7 @@ impl AppState {
                 );
                 self.start_network_call(*network_call_id);
             }
-            ProviderWork::GenerateImage((
-                row,
-                col,
-                input,
-                cache_key,
-                _,
-                network_call_id,
-            )) => {
+            ProviderWork::GenerateImage((row, col, input, cache_key, _, network_call_id)) => {
                 self.document.sheet_mut().set_cell_value_with_cache(
                     *row,
                     *col,
@@ -1592,14 +1601,7 @@ impl AppState {
                 );
                 self.start_network_call(*network_call_id);
             }
-            ProviderWork::GenerateVideo((
-                row,
-                col,
-                input,
-                cache_key,
-                _,
-                network_call_id,
-            )) => {
+            ProviderWork::GenerateVideo((row, col, input, cache_key, _, network_call_id)) => {
                 self.document.sheet_mut().set_cell_value_with_cache(
                     *row,
                     *col,
@@ -1611,14 +1613,7 @@ impl AppState {
                 );
                 self.start_network_call(*network_call_id);
             }
-            ProviderWork::Segment((
-                row,
-                col,
-                input,
-                cache_key,
-                _,
-                network_call_id,
-            )) => {
+            ProviderWork::Segment((row, col, input, cache_key, _, network_call_id)) => {
                 self.document.sheet_mut().set_cell_value_with_cache(
                     *row,
                     *col,
@@ -2334,16 +2329,25 @@ fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 
         let is_sof = matches!(
             marker,
-            0xC0 | 0xC1 | 0xC2 | 0xC3 | 0xC5 | 0xC6 | 0xC7 | 0xC9 | 0xCA | 0xCB | 0xCD | 0xCE | 0xCF
+            0xC0 | 0xC1
+                | 0xC2
+                | 0xC3
+                | 0xC5
+                | 0xC6
+                | 0xC7
+                | 0xC9
+                | 0xCA
+                | 0xCB
+                | 0xCD
+                | 0xCE
+                | 0xCF
         );
         if is_sof {
             if segment_length < 7 {
                 return None;
             }
-            let height =
-                u16::from_be_bytes(bytes[index + 3..index + 5].try_into().ok()?) as u32;
-            let width =
-                u16::from_be_bytes(bytes[index + 5..index + 7].try_into().ok()?) as u32;
+            let height = u16::from_be_bytes(bytes[index + 3..index + 5].try_into().ok()?) as u32;
+            let width = u16::from_be_bytes(bytes[index + 5..index + 7].try_into().ok()?) as u32;
             return (width > 0 && height > 0).then_some((width, height));
         }
 
@@ -2615,10 +2619,11 @@ mod tests {
     fn saved_pending_provider_calls_are_rebuilt_for_approval() {
         let mut state = AppState::new();
         state.new_document();
-        state
-            .document
-            .sheet_mut()
-            .set_cell_input(0, 0, r#"=GENERATEIMAGE("A cat", "flux/dev")"#.to_string());
+        state.document.sheet_mut().set_cell_input(
+            0,
+            0,
+            r#"=GENERATEIMAGE("A cat", "flux/dev")"#.to_string(),
+        );
 
         state.pending_provider_calls.clear();
         state.network_calls.clear();
@@ -2742,6 +2747,34 @@ mod tests {
         assert_eq!(record.url, "https://queue.fal.run/fal-ai/sam-3/image");
         assert_eq!(record.image_inputs, vec!["https://example.com/image.png"]);
         assert_eq!(record.request_body["image_url"], "<shown in Images>");
+    }
+
+    #[test]
+    fn generate_video_network_record_extracts_start_and_end_images() {
+        let request = GenerateVideoRequest::new(
+            "Animate it",
+            "https://example.com/start.png",
+            Some("https://example.com/end.png".to_string()),
+            Some("fal-ai/kling-video/o1/standard/image-to-video".to_string()),
+            Some(5),
+            None,
+        )
+        .unwrap();
+
+        let record =
+            NetworkCallRecord::for_generate_video(9, 1, 2, NetworkCallStatus::Running, &request);
+
+        assert_eq!(record.function_name, "GENERATEVIDEO");
+        assert_eq!(record.provider, "fal.video");
+        assert_eq!(
+            record.image_inputs,
+            vec![
+                "https://example.com/start.png".to_string(),
+                "https://example.com/end.png".to_string()
+            ]
+        );
+        assert_eq!(record.request_body["start_image_url"], "<shown in Images>");
+        assert_eq!(record.request_body["end_image_url"], "<shown in Images>");
     }
 
     #[test]

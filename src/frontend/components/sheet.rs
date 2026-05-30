@@ -946,14 +946,7 @@ pub(crate) fn prepare_provider_work(
 
 pub(crate) fn spawn_provider_work(state: Signal<AppState>, work: Option<ProviderWork>) {
     match work {
-        Some(ProviderWork::Llm((
-            row,
-            col,
-            input,
-            cache_key,
-            request,
-            network_call_id,
-        ))) => {
+        Some(ProviderWork::Llm((row, col, input, cache_key, request, network_call_id))) => {
             spawn(async move {
                 AppState::run_openrouter_for_cell(
                     state,
@@ -1009,14 +1002,7 @@ pub(crate) fn spawn_provider_work(state: Signal<AppState>, work: Option<Provider
                 .await;
             });
         }
-        Some(ProviderWork::Segment((
-            row,
-            col,
-            input,
-            cache_key,
-            request,
-            network_call_id,
-        ))) => {
+        Some(ProviderWork::Segment((row, col, input, cache_key, request, network_call_id))) => {
             spawn(async move {
                 AppState::run_segment_for_cell(
                     state,
@@ -1030,13 +1016,7 @@ pub(crate) fn spawn_provider_work(state: Signal<AppState>, work: Option<Provider
                 .await;
             });
         }
-        Some(ProviderWork::ConcatenateVideo((
-            row,
-            col,
-            input,
-            cache_key,
-            video_inputs,
-        ))) => {
+        Some(ProviderWork::ConcatenateVideo((row, col, input, cache_key, video_inputs))) => {
             spawn(async move {
                 AppState::run_concatenate_video_for_cell(
                     state,

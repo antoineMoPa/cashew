@@ -1,7 +1,12 @@
 use std::sync::OnceLock;
 
 use super::providers::{
-    fal_image::image_model_docs, fal_video::video_model_docs,
+    fal_image::image_model_docs,
+    fal_video::video_model_docs,
+    fal_video::{
+        video_model_default_duration, video_model_requires_end_image,
+        video_model_supports_aspect_ratio,
+    },
     openrouter::DEFAULT_MODEL as DEFAULT_LLM_MODEL,
 };
 
@@ -202,10 +207,16 @@ const GENERATE_VIDEO_ARGUMENTS: &[FormulaArgumentDoc] = &[
         description: "Prompt text describing the desired motion.",
     },
     FormulaArgumentDoc {
-        name: "image",
+        name: "start_image",
         kind: "URL or data URI",
         required: true,
-        description: "Source image URL or a cell reference resolving to one.",
+        description: "First frame image URL or a cell reference resolving to one.",
+    },
+    FormulaArgumentDoc {
+        name: "end_image?",
+        kind: "URL or data URI",
+        required: false,
+        description: "Optional second frame image for Kling O1 first-frame last-frame models.",
     },
     FormulaArgumentDoc {
         name: "model?",
@@ -316,15 +327,16 @@ pub const FORMULA_FUNCTIONS: &[FormulaFunction] = &[
     },
     FormulaFunction {
         name: "GENERATEVIDEO",
-        signature: "GENERATEVIDEO(prompt, image, model?, duration?, aspect_ratio?)",
+        signature: "GENERATEVIDEO(prompt, start_image, end_image?, model?, duration?, aspect_ratio?)",
         insert_text: "=GENERATEVIDEO(prompt, $, \"fal-ai/veo3.1/reference-to-video\", 8, \"16:9\")",
         runs_without_approval: false,
         summary: "Generate or reuse a video clip from prompt and media inputs.",
-        details: "Runs through fal video endpoints. The selected model determines whether the request uses image_url, image_urls, or start_image_url and which duration/aspect-ratio options are valid.",
+        details: "Runs through fal video endpoints. The selected model determines whether the request uses image_url, image_urls, start_image_url, or start_image_url plus end_image_url, and which duration/aspect-ratio options are valid. For Kling O1 first-frame last-frame models, place the end image immediately after the start image.",
         arguments: GENERATE_VIDEO_ARGUMENTS,
         models: &[],
         notes: &[
             "Default model: fal-ai/veo3.1/reference-to-video.",
+            "Kling O1 first-frame last-frame models use the second image argument as the end frame.",
             "Kling v3 models infer aspect ratio from the source image and ignore the aspect_ratio argument.",
             "Cache-first: identical formulas with identical resolved inputs reuse stored results.",
         ],
@@ -622,7 +634,14 @@ pub fn formula_example_for_function(
         "GENERATEIMAGE" => format!("=GENERATEIMAGE(prompt, \"{model_id}\")"),
         "SEGMENT" => "=SEGMENT($, \"wheel\")".to_string(),
         "GENERATEVIDEO" => {
-            format!("=GENERATEVIDEO(prompt, $, \"{model_id}\", 8, \"16:9\")")
+            let duration = video_model_default_duration(model_id).unwrap_or(8);
+            if video_model_requires_end_image(model_id) {
+                format!("=GENERATEVIDEO(prompt, $, $, \"{model_id}\", {duration})")
+            } else if video_model_supports_aspect_ratio(model_id) {
+                format!("=GENERATEVIDEO(prompt, $, \"{model_id}\", {duration}, \"16:9\")")
+            } else {
+                format!("=GENERATEVIDEO(prompt, $, \"{model_id}\", {duration})")
+            }
         }
         "LLM" => format!("=LLM(prompt, \"{model_id}\", $, system_prompt)"),
         "LLM_LIST_DOWN" => {
@@ -718,6 +737,32 @@ mod tests {
     }
 
     #[test]
+    fn generate_video_docs_include_first_last_frame_models() {
+        let function = FORMULA_FUNCTIONS
+            .iter()
+            .find(|function| function.name == "GENERATEVIDEO")
+            .unwrap();
+        let models = models_for_function(*function);
+
+        assert!(
+            models
+                .iter()
+                .any(|model| model.id == "fal-ai/kling-video/o1/standard/image-to-video")
+        );
+        assert!(
+            models
+                .iter()
+                .any(|model| model.id == "fal-ai/kling-video/o1/image-to-video")
+        );
+        assert!(
+            function
+                .arguments
+                .iter()
+                .any(|arg| arg.name == "end_image?")
+        );
+    }
+
+    #[test]
     fn segment_docs_include_segmentation_specific_arguments() {
         let function = FORMULA_FUNCTIONS
             .iter()
@@ -800,7 +845,14 @@ mod tests {
                 *video_function,
                 Some("fal-ai/kling-video/v3/standard/image-to-video")
             ),
-            r#"=GENERATEVIDEO(prompt, $, "fal-ai/kling-video/v3/standard/image-to-video", 8, "16:9")"#
+            r#"=GENERATEVIDEO(prompt, $, "fal-ai/kling-video/v3/standard/image-to-video", 5)"#
+        );
+        assert_eq!(
+            formula_example_for_function(
+                *video_function,
+                Some("fal-ai/kling-video/o1/standard/image-to-video")
+            ),
+            r#"=GENERATEVIDEO(prompt, $, $, "fal-ai/kling-video/o1/standard/image-to-video", 5)"#
         );
         let segment_function = FORMULA_FUNCTIONS
             .iter()

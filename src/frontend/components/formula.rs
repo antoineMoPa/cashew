@@ -6,8 +6,8 @@ use crate::backend::formulas::{FormulaFunction, matching_functions};
 
 use super::super::state::{AppState, NetworkCallStatus, should_show_completions};
 use super::sheet::{
-    accept_highlighted_formula_completion, formula_reference_segments, map_editor_text,
-    queue_or_spawn_provider_work, spawn_provider_work, FormulaSegment,
+    FormulaSegment, accept_highlighted_formula_completion, formula_reference_segments,
+    map_editor_text, queue_or_spawn_provider_work, spawn_provider_work,
 };
 
 #[component]

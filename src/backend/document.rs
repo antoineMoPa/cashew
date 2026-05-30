@@ -279,7 +279,13 @@ impl Sheet {
     ) {
         match output {
             LlmFormulaOutput::Text(value) => {
-                self.set_cell_value_with_cache(row, col, input, CellValue::Cached(value), cache_key);
+                self.set_cell_value_with_cache(
+                    row,
+                    col,
+                    input,
+                    CellValue::Cached(value),
+                    cache_key,
+                );
             }
             LlmFormulaOutput::List(items) => {
                 self.write_llm_list_output(row, col, input, cache_key, items, request);
@@ -357,19 +363,18 @@ impl Sheet {
             return;
         }
 
-        let Some((anchor_key, spill_range)) = self
-            .cells
-            .iter()
-            .find_map(|(key, cell)| {
-                cell.spill_range
-                    .filter(|spill_range| spill_range.contains(row, col))
-                    .map(|spill_range| (key.clone(), spill_range))
-            })
-        else {
+        let Some((anchor_key, spill_range)) = self.cells.iter().find_map(|(key, cell)| {
+            cell.spill_range
+                .filter(|spill_range| spill_range.contains(row, col))
+                .map(|spill_range| (key.clone(), spill_range))
+        }) else {
             return;
         };
 
-        self.clear_spill_range_with_range(spill_range, &[anchor_key.as_str(), current_key.as_str()]);
+        self.clear_spill_range_with_range(
+            spill_range,
+            &[anchor_key.as_str(), current_key.as_str()],
+        );
         if let Some(anchor_cell) = self.cells.get_mut(&anchor_key) {
             anchor_cell.spill_range = None;
         }
@@ -515,11 +520,9 @@ mod tests {
     #[test]
     fn document_round_trips_as_json() {
         let mut document = CashewDocument::new("Movie draft");
-        document.sheet_mut().set_cell_input(
-            0,
-            0,
-            "=GENERATEIMAGE(A1,A2)".to_string(),
-        );
+        document
+            .sheet_mut()
+            .set_cell_input(0, 0, "=GENERATEIMAGE(A1,A2)".to_string());
 
         let json = serde_json::to_string_pretty(&document).unwrap();
         let parsed: CashewDocument = serde_json::from_str(&json).unwrap();
@@ -669,7 +672,13 @@ mod tests {
             Some("cache-a".to_string()),
             Some(spill_range),
         );
-        sheet.set_cell_value_with_cache(0, 1, String::new(), CellValue::Text("chair".to_string()), None);
+        sheet.set_cell_value_with_cache(
+            0,
+            1,
+            String::new(),
+            CellValue::Text("chair".to_string()),
+            None,
+        );
 
         assert_eq!(sheet.cell(0, 0).and_then(|cell| cell.spill_range), None);
         assert_eq!(
