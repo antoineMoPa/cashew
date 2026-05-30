@@ -23,6 +23,7 @@ Easy
  - OVERLAY -> overlay images, video, etc
  - VECTORIZEIMAGE -> raster to vector
  - READURL -> read a page in a headless browser
+ - VOXEL -> convert model to voxels (cubes)
 
 
 ## Features
