@@ -50,5 +50,4 @@ Easy
 
 ## Code cleanup
 
- - formula implementations file is getting too big
  -
