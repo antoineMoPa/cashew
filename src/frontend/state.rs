@@ -1,5 +1,7 @@
 use std::{
+    collections::BTreeMap,
     fs,
+    future::Future,
     path::{Path, PathBuf},
     process::Command,
     time::Duration,
@@ -74,6 +76,7 @@ pub(crate) struct AppState {
     pub(crate) pending_provider_calls: Vec<QueuedProviderCall>,
     pub(crate) copied_cells: Option<CopiedCells>,
     pub(crate) toast: Option<AppToast>,
+    in_flight_provider_calls: BTreeMap<String, Vec<ProviderWaiter>>,
     next_network_call_id: u64,
     next_toast_id: u64,
 }
@@ -114,6 +117,74 @@ pub(crate) enum BottomPanelTab {
 #[derive(Debug, Clone)]
 pub(crate) struct QueuedProviderCall {
     pub(crate) work: ProviderWork,
+}
+
+#[derive(Debug, Clone)]
+enum ProviderWaiter {
+    Llm {
+        row: usize,
+        col: usize,
+        input: String,
+        request: LlmRequest,
+    },
+    GenerateImage {
+        row: usize,
+        col: usize,
+        input: String,
+        network_call_id: Option<u64>,
+    },
+    GenerateVideo {
+        row: usize,
+        col: usize,
+        input: String,
+        network_call_id: Option<u64>,
+    },
+    Segment {
+        row: usize,
+        col: usize,
+        input: String,
+        network_call_id: Option<u64>,
+    },
+    ConcatenateVideo {
+        row: usize,
+        col: usize,
+        input: String,
+    },
+}
+
+impl ProviderWaiter {
+    fn cell_input(&self) -> (usize, usize, String) {
+        match self {
+            Self::Llm {
+                row, col, input, ..
+            }
+            | Self::GenerateImage {
+                row, col, input, ..
+            }
+            | Self::GenerateVideo {
+                row, col, input, ..
+            }
+            | Self::Segment {
+                row, col, input, ..
+            }
+            | Self::ConcatenateVideo { row, col, input } => (*row, *col, input.clone()),
+        }
+    }
+
+    fn network_call_id(&self) -> Option<u64> {
+        match self {
+            Self::GenerateImage {
+                network_call_id, ..
+            }
+            | Self::GenerateVideo {
+                network_call_id, ..
+            }
+            | Self::Segment {
+                network_call_id, ..
+            } => *network_call_id,
+            Self::Llm { .. } | Self::ConcatenateVideo { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,6 +253,7 @@ impl AppState {
             pending_provider_calls: Vec::new(),
             copied_cells: None,
             toast: None,
+            in_flight_provider_calls: BTreeMap::new(),
             next_network_call_id: 1,
             next_toast_id: 1,
         };
@@ -271,7 +343,13 @@ impl AppState {
         request: LlmRequest,
         network_call_id: u64,
     ) {
-        let result = run_openrouter_request(&request.request).await;
+        let request_for_worker = request.request.clone();
+        let result = run_formula_worker(move || {
+            block_on_formula_worker(
+                async move { run_openrouter_request(&request_for_worker).await },
+            )
+        })
+        .await;
 
         state.with_mut(|state| {
             let error_message = result.as_ref().err().map(ToString::to_string);
@@ -289,7 +367,13 @@ impl AppState {
         request: GenerateImageRequest,
         network_call_id: u64,
     ) {
-        let result = run_generate_image_request(&request).await;
+        let request_for_worker = request.clone();
+        let result = run_formula_worker(move || {
+            block_on_formula_worker(
+                async move { run_generate_image_request(&request_for_worker).await },
+            )
+        })
+        .await;
 
         state.with_mut(|state| {
             let error_message = result.as_ref().err().map(ToString::to_string);
@@ -307,7 +391,13 @@ impl AppState {
         request: GenerateVideoRequest,
         network_call_id: u64,
     ) {
-        let result = run_generate_video_request(&request).await;
+        let request_for_worker = request.clone();
+        let result = run_formula_worker(move || {
+            block_on_formula_worker(
+                async move { run_generate_video_request(&request_for_worker).await },
+            )
+        })
+        .await;
 
         state.with_mut(|state| {
             let error_message = result.as_ref().err().map(ToString::to_string);
@@ -325,7 +415,11 @@ impl AppState {
         request: SegmentImageRequest,
         network_call_id: u64,
     ) {
-        let result = run_segment_request(&request).await;
+        let request_for_worker = request.clone();
+        let result = run_formula_worker(move || {
+            block_on_formula_worker(async move { run_segment_request(&request_for_worker).await })
+        })
+        .await;
 
         state.with_mut(|state| {
             let error_message = result.as_ref().err().map(ToString::to_string);
@@ -342,7 +436,13 @@ impl AppState {
         cache_key: String,
         video_inputs: Vec<String>,
     ) {
-        let result = run_concatenate_video_request(&video_inputs).await;
+        let video_inputs_for_worker = video_inputs.clone();
+        let result = run_formula_worker(move || {
+            block_on_formula_worker(async move {
+                run_concatenate_video_request(&video_inputs_for_worker).await
+            })
+        })
+        .await;
 
         state.with_mut(|state| {
             state.finish_concatenate_video_for_cell(row, col, input, cache_key, result);
@@ -366,9 +466,9 @@ impl AppState {
 
         pending
             .into_iter()
-            .map(|pending_call| {
-                self.start_pending_provider_work(&pending_call.work);
-                pending_call.work
+            .filter_map(|pending_call| {
+                self.start_pending_provider_work(&pending_call.work)
+                    .then_some(pending_call.work)
             })
             .collect()
     }
@@ -376,6 +476,7 @@ impl AppState {
     fn rebuild_pending_provider_calls_from_document(&mut self) {
         self.pending_provider_calls.clear();
         self.network_calls.clear();
+        self.in_flight_provider_calls.clear();
         self.next_network_call_id = 1;
 
         let mut rebuilt = 0;
@@ -410,6 +511,7 @@ impl AppState {
         if rebuilt > 0 {
             self.status = format!("Queued {rebuilt} pending provider calls from document");
         }
+        self.in_flight_provider_calls.clear();
     }
 
     pub(crate) fn prepare_llm_for_cell(
@@ -453,6 +555,19 @@ impl AppState {
             return None;
         }
 
+        if self.wait_for_in_flight_provider_call(
+            &cache_key,
+            ProviderWaiter::Llm {
+                row,
+                col,
+                input: input.clone(),
+                request: request.clone(),
+            },
+            openrouter_waiting_message(request.output_mode),
+        ) {
+            return None;
+        }
+
         self.document.sheet_mut().set_cell_value_with_cache(
             row,
             col,
@@ -474,6 +589,8 @@ impl AppState {
             NetworkCallStatus::Running,
             &request,
         ));
+
+        self.register_in_flight_provider_call(&cache_key);
 
         Some((row, col, input, cache_key, request, network_call_id))
     }
@@ -529,6 +646,21 @@ impl AppState {
             return None;
         }
 
+        if !approval_required
+            && self.wait_for_in_flight_provider_call(
+                &cache_key,
+                ProviderWaiter::GenerateImage {
+                    row,
+                    col,
+                    input: input.clone(),
+                    network_call_id: None,
+                },
+                "Waiting for matching image generation...",
+            )
+        {
+            return None;
+        }
+
         let pending_message = if approval_required {
             "fal.image request is pending approval".to_string()
         } else {
@@ -559,6 +691,10 @@ impl AppState {
             },
             &request,
         ));
+
+        if !approval_required {
+            self.register_in_flight_provider_call(&cache_key);
+        }
 
         Some((row, col, input, cache_key, request, network_call_id))
     }
@@ -614,6 +750,21 @@ impl AppState {
             return None;
         }
 
+        if !approval_required
+            && self.wait_for_in_flight_provider_call(
+                &cache_key,
+                ProviderWaiter::GenerateVideo {
+                    row,
+                    col,
+                    input: input.clone(),
+                    network_call_id: None,
+                },
+                "Waiting for matching video generation...",
+            )
+        {
+            return None;
+        }
+
         let pending_message = if approval_required {
             "fal.video request is pending approval".to_string()
         } else {
@@ -644,6 +795,10 @@ impl AppState {
             },
             &request,
         ));
+
+        if !approval_required {
+            self.register_in_flight_provider_call(&cache_key);
+        }
 
         Some((row, col, input, cache_key, request, network_call_id))
     }
@@ -699,6 +854,21 @@ impl AppState {
             return None;
         }
 
+        if !approval_required
+            && self.wait_for_in_flight_provider_call(
+                &cache_key,
+                ProviderWaiter::Segment {
+                    row,
+                    col,
+                    input: input.clone(),
+                    network_call_id: None,
+                },
+                "Waiting for matching segmentation...",
+            )
+        {
+            return None;
+        }
+
         let pending_message = if approval_required {
             "fal.segment request is pending approval".to_string()
         } else {
@@ -729,6 +899,10 @@ impl AppState {
             },
             &request,
         ));
+
+        if !approval_required {
+            self.register_in_flight_provider_call(&cache_key);
+        }
 
         Some((row, col, input, cache_key, request, network_call_id))
     }
@@ -782,6 +956,18 @@ impl AppState {
             return None;
         }
 
+        if self.wait_for_in_flight_provider_call(
+            &cache_key,
+            ProviderWaiter::ConcatenateVideo {
+                row,
+                col,
+                input: input.clone(),
+            },
+            "Waiting for matching video concatenation...",
+        ) {
+            return None;
+        }
+
         self.document.sheet_mut().set_cell_value_with_cache(
             row,
             col,
@@ -792,6 +978,7 @@ impl AppState {
             Some(cache_key.clone()),
         );
         self.status = format!("Concatenating video clips for {}", cell_key(row, col));
+        self.register_in_flight_provider_call(&cache_key);
 
         Some((row, col, input, cache_key, video_inputs))
     }
@@ -818,8 +1005,15 @@ impl AppState {
                 cell_key(row, col)
             )
         };
-        self.document
-            .finish_openrouter_for_cell(row, col, input, cache_key, request, result);
+        self.document.finish_openrouter_for_cell(
+            row,
+            col,
+            input,
+            cache_key.clone(),
+            request,
+            result,
+        );
+        self.finish_waiting_provider_cells(&cache_key);
         self.dirty = true;
     }
 
@@ -863,22 +1057,25 @@ impl AppState {
             }
         };
 
-        let sheet = self.document.sheet_mut();
-        sheet.set_cell_value_with_cache(row, col, input, value, Some(cache_key));
-        if matches!(
-            sheet.cell(row, col).map(|cell| &cell.value),
-            Some(CellValue::Cached(_))
-        ) {
-            resize_media_cell(
-                sheet,
-                row,
-                col,
-                GENERATED_IMAGE_COLUMN_WIDTH,
-                GENERATED_IMAGE_ROW_HEIGHT,
-                media_dimensions,
-            );
+        {
+            let sheet = self.document.sheet_mut();
+            sheet.set_cell_value_with_cache(row, col, input, value, Some(cache_key.clone()));
+            if matches!(
+                sheet.cell(row, col).map(|cell| &cell.value),
+                Some(CellValue::Cached(_))
+            ) {
+                resize_media_cell(
+                    sheet,
+                    row,
+                    col,
+                    GENERATED_IMAGE_COLUMN_WIDTH,
+                    GENERATED_IMAGE_ROW_HEIGHT,
+                    media_dimensions,
+                );
+            }
+            sheet.recalculate_formulas();
         }
-        sheet.recalculate_formulas();
+        self.finish_waiting_provider_cells(&cache_key);
         self.dirty = true;
     }
 
@@ -922,22 +1119,25 @@ impl AppState {
             }
         };
 
-        let sheet = self.document.sheet_mut();
-        sheet.set_cell_value_with_cache(row, col, input, value, Some(cache_key));
-        if matches!(
-            sheet.cell(row, col).map(|cell| &cell.value),
-            Some(CellValue::Cached(_))
-        ) {
-            resize_media_cell(
-                sheet,
-                row,
-                col,
-                GENERATED_VIDEO_COLUMN_WIDTH,
-                GENERATED_VIDEO_ROW_HEIGHT,
-                media_dimensions,
-            );
+        {
+            let sheet = self.document.sheet_mut();
+            sheet.set_cell_value_with_cache(row, col, input, value, Some(cache_key.clone()));
+            if matches!(
+                sheet.cell(row, col).map(|cell| &cell.value),
+                Some(CellValue::Cached(_))
+            ) {
+                resize_media_cell(
+                    sheet,
+                    row,
+                    col,
+                    GENERATED_VIDEO_COLUMN_WIDTH,
+                    GENERATED_VIDEO_ROW_HEIGHT,
+                    media_dimensions,
+                );
+            }
+            sheet.recalculate_formulas();
         }
-        sheet.recalculate_formulas();
+        self.finish_waiting_provider_cells(&cache_key);
         self.dirty = true;
     }
 
@@ -981,22 +1181,25 @@ impl AppState {
             }
         };
 
-        let sheet = self.document.sheet_mut();
-        sheet.set_cell_value_with_cache(row, col, input, value, Some(cache_key));
-        if matches!(
-            sheet.cell(row, col).map(|cell| &cell.value),
-            Some(CellValue::Cached(_))
-        ) {
-            resize_media_cell(
-                sheet,
-                row,
-                col,
-                GENERATED_IMAGE_COLUMN_WIDTH,
-                GENERATED_IMAGE_ROW_HEIGHT,
-                media_dimensions,
-            );
+        {
+            let sheet = self.document.sheet_mut();
+            sheet.set_cell_value_with_cache(row, col, input, value, Some(cache_key.clone()));
+            if matches!(
+                sheet.cell(row, col).map(|cell| &cell.value),
+                Some(CellValue::Cached(_))
+            ) {
+                resize_media_cell(
+                    sheet,
+                    row,
+                    col,
+                    GENERATED_IMAGE_COLUMN_WIDTH,
+                    GENERATED_IMAGE_ROW_HEIGHT,
+                    media_dimensions,
+                );
+            }
+            sheet.recalculate_formulas();
         }
-        sheet.recalculate_formulas();
+        self.finish_waiting_provider_cells(&cache_key);
         self.dirty = true;
     }
 
@@ -1040,22 +1243,25 @@ impl AppState {
             }
         };
 
-        let sheet = self.document.sheet_mut();
-        sheet.set_cell_value_with_cache(row, col, input, value, Some(cache_key));
-        if matches!(
-            sheet.cell(row, col).map(|cell| &cell.value),
-            Some(CellValue::Cached(_))
-        ) {
-            resize_media_cell(
-                sheet,
-                row,
-                col,
-                GENERATED_VIDEO_COLUMN_WIDTH,
-                GENERATED_VIDEO_ROW_HEIGHT,
-                media_dimensions,
-            );
+        {
+            let sheet = self.document.sheet_mut();
+            sheet.set_cell_value_with_cache(row, col, input, value, Some(cache_key.clone()));
+            if matches!(
+                sheet.cell(row, col).map(|cell| &cell.value),
+                Some(CellValue::Cached(_))
+            ) {
+                resize_media_cell(
+                    sheet,
+                    row,
+                    col,
+                    GENERATED_VIDEO_COLUMN_WIDTH,
+                    GENERATED_VIDEO_ROW_HEIGHT,
+                    media_dimensions,
+                );
+            }
+            sheet.recalculate_formulas();
         }
-        sheet.recalculate_formulas();
+        self.finish_waiting_provider_cells(&cache_key);
         self.dirty = true;
     }
 
@@ -1228,6 +1434,7 @@ impl AppState {
         self.fill_dragging = None;
         self.pending_provider_calls.clear();
         self.network_calls.clear();
+        self.in_flight_provider_calls.clear();
         self.next_network_call_id = 1;
         self.status = "Created a new document".to_string();
         self.set_selected_cell(0, 0);
@@ -1628,7 +1835,19 @@ impl NetworkCallRecord {
 }
 
 impl AppState {
-    fn start_pending_provider_work(&mut self, work: &ProviderWork) {
+    fn start_pending_provider_work(&mut self, work: &ProviderWork) -> bool {
+        if let Some(cache_key) = provider_work_cache_key(work) {
+            if self
+                .in_flight_provider_calls
+                .contains_key(cache_key.as_str())
+            {
+                let waiter = provider_waiter_for_work(work);
+                let message = waiting_message_for_work(work);
+                self.wait_for_in_flight_provider_call(cache_key.as_str(), waiter, message);
+                return false;
+            }
+        }
+
         match work {
             ProviderWork::Llm((row, col, input, cache_key, request, network_call_id)) => {
                 self.document.sheet_mut().set_cell_value_with_cache(
@@ -1641,6 +1860,7 @@ impl AppState {
                     Some((*cache_key).clone()),
                 );
                 self.start_network_call(*network_call_id);
+                self.register_in_flight_provider_call(cache_key);
             }
             ProviderWork::GenerateImage((row, col, input, cache_key, _, network_call_id)) => {
                 self.document.sheet_mut().set_cell_value_with_cache(
@@ -1653,6 +1873,7 @@ impl AppState {
                     Some((*cache_key).clone()),
                 );
                 self.start_network_call(*network_call_id);
+                self.register_in_flight_provider_call(cache_key);
             }
             ProviderWork::GenerateVideo((row, col, input, cache_key, _, network_call_id)) => {
                 self.document.sheet_mut().set_cell_value_with_cache(
@@ -1665,6 +1886,7 @@ impl AppState {
                     Some((*cache_key).clone()),
                 );
                 self.start_network_call(*network_call_id);
+                self.register_in_flight_provider_call(cache_key);
             }
             ProviderWork::Segment((row, col, input, cache_key, _, network_call_id)) => {
                 self.document.sheet_mut().set_cell_value_with_cache(
@@ -1677,6 +1899,7 @@ impl AppState {
                     Some((*cache_key).clone()),
                 );
                 self.start_network_call(*network_call_id);
+                self.register_in_flight_provider_call(cache_key);
             }
             ProviderWork::ConcatenateVideo((row, col, input, cache_key, _)) => {
                 self.document.sheet_mut().set_cell_value_with_cache(
@@ -1689,13 +1912,145 @@ impl AppState {
                     Some((*cache_key).clone()),
                 );
                 self.status = format!("Concatenating video clips for {}", cell_key(*row, *col));
+                self.register_in_flight_provider_call(cache_key);
             }
         }
+        true
     }
 
     fn start_network_call(&mut self, id: u64) {
         if let Some(record) = self.network_calls.iter_mut().find(|record| record.id == id) {
             record.status = NetworkCallStatus::Running;
+        }
+    }
+
+    fn register_in_flight_provider_call(&mut self, cache_key: &str) {
+        self.in_flight_provider_calls
+            .entry(cache_key.to_string())
+            .or_default();
+    }
+
+    fn wait_for_in_flight_provider_call(
+        &mut self,
+        cache_key: &str,
+        waiter: ProviderWaiter,
+        message: &str,
+    ) -> bool {
+        if !self.in_flight_provider_calls.contains_key(cache_key) {
+            return false;
+        }
+
+        if let Some(network_call_id) = waiter.network_call_id() {
+            self.start_network_call(network_call_id);
+        }
+
+        let (row, col, input) = waiter.cell_input();
+        self.document.sheet_mut().set_cell_value_with_cache(
+            row,
+            col,
+            input,
+            CellValue::FormulaPending {
+                message: message.to_string(),
+            },
+            Some(cache_key.to_string()),
+        );
+        self.in_flight_provider_calls
+            .entry(cache_key.to_string())
+            .or_default()
+            .push(waiter);
+        self.dirty = true;
+        self.status = format!(
+            "Waiting for matching provider call for {}",
+            cell_key(row, col)
+        );
+        true
+    }
+
+    fn finish_waiting_provider_cells(&mut self, cache_key: &str) {
+        let Some(waiters) = self.in_flight_provider_calls.remove(cache_key) else {
+            return;
+        };
+
+        for waiter in waiters {
+            match waiter {
+                ProviderWaiter::Llm {
+                    row,
+                    col,
+                    input,
+                    request,
+                } => {
+                    let result = cached_text_result(&self.document, cache_key);
+                    self.finish_openrouter_for_cell(
+                        row,
+                        col,
+                        input,
+                        cache_key.to_string(),
+                        request,
+                        result,
+                    );
+                }
+                ProviderWaiter::GenerateImage {
+                    row,
+                    col,
+                    input,
+                    network_call_id,
+                } => {
+                    let result = cached_media_asset_result(&self.document, cache_key);
+                    if let Some(network_call_id) = network_call_id {
+                        let error_message = result.as_ref().err().map(ToString::to_string);
+                        self.finish_network_call(network_call_id, result.is_ok(), error_message);
+                    }
+                    self.finish_generate_image_for_cell(
+                        row,
+                        col,
+                        input,
+                        cache_key.to_string(),
+                        result,
+                    );
+                }
+                ProviderWaiter::GenerateVideo {
+                    row,
+                    col,
+                    input,
+                    network_call_id,
+                } => {
+                    let result = cached_media_asset_result(&self.document, cache_key);
+                    if let Some(network_call_id) = network_call_id {
+                        let error_message = result.as_ref().err().map(ToString::to_string);
+                        self.finish_network_call(network_call_id, result.is_ok(), error_message);
+                    }
+                    self.finish_generate_video_for_cell(
+                        row,
+                        col,
+                        input,
+                        cache_key.to_string(),
+                        result,
+                    );
+                }
+                ProviderWaiter::Segment {
+                    row,
+                    col,
+                    input,
+                    network_call_id,
+                } => {
+                    let result = cached_media_asset_result(&self.document, cache_key);
+                    if let Some(network_call_id) = network_call_id {
+                        let error_message = result.as_ref().err().map(ToString::to_string);
+                        self.finish_network_call(network_call_id, result.is_ok(), error_message);
+                    }
+                    self.finish_segment_for_cell(row, col, input, cache_key.to_string(), result);
+                }
+                ProviderWaiter::ConcatenateVideo { row, col, input } => {
+                    let result = cached_media_asset_result(&self.document, cache_key);
+                    self.finish_concatenate_video_for_cell(
+                        row,
+                        col,
+                        input,
+                        cache_key.to_string(),
+                        result,
+                    );
+                }
+            }
         }
     }
 }
@@ -1731,6 +2086,70 @@ fn request_body_without_images(body: &serde_json::Value) -> serde_json::Value {
         }
     }
     sanitized
+}
+
+fn provider_work_cache_key(work: &ProviderWork) -> Option<String> {
+    match work {
+        ProviderWork::Llm((_, _, _, cache_key, _, _))
+        | ProviderWork::GenerateImage((_, _, _, cache_key, _, _))
+        | ProviderWork::GenerateVideo((_, _, _, cache_key, _, _))
+        | ProviderWork::Segment((_, _, _, cache_key, _, _))
+        | ProviderWork::ConcatenateVideo((_, _, _, cache_key, _)) => Some(cache_key.clone()),
+    }
+}
+
+fn provider_waiter_for_work(work: &ProviderWork) -> ProviderWaiter {
+    match work {
+        ProviderWork::Llm((row, col, input, _, request, _)) => ProviderWaiter::Llm {
+            row: *row,
+            col: *col,
+            input: input.clone(),
+            request: request.clone(),
+        },
+        ProviderWork::GenerateImage((row, col, input, _, _, network_call_id)) => {
+            ProviderWaiter::GenerateImage {
+                row: *row,
+                col: *col,
+                input: input.clone(),
+                network_call_id: Some(*network_call_id),
+            }
+        }
+        ProviderWork::GenerateVideo((row, col, input, _, _, network_call_id)) => {
+            ProviderWaiter::GenerateVideo {
+                row: *row,
+                col: *col,
+                input: input.clone(),
+                network_call_id: Some(*network_call_id),
+            }
+        }
+        ProviderWork::Segment((row, col, input, _, _, network_call_id)) => {
+            ProviderWaiter::Segment {
+                row: *row,
+                col: *col,
+                input: input.clone(),
+                network_call_id: Some(*network_call_id),
+            }
+        }
+        ProviderWork::ConcatenateVideo((row, col, input, _, _)) => {
+            ProviderWaiter::ConcatenateVideo {
+                row: *row,
+                col: *col,
+                input: input.clone(),
+            }
+        }
+    }
+}
+
+fn waiting_message_for_work(work: &ProviderWork) -> &'static str {
+    match work {
+        ProviderWork::Llm((_, _, _, _, request, _)) => {
+            openrouter_waiting_message(request.output_mode)
+        }
+        ProviderWork::GenerateImage(_) => "Waiting for matching image generation...",
+        ProviderWork::GenerateVideo(_) => "Waiting for matching video generation...",
+        ProviderWork::Segment(_) => "Waiting for matching segmentation...",
+        ProviderWork::ConcatenateVideo(_) => "Waiting for matching video concatenation...",
+    }
 }
 
 fn load_default_document_for_ui() -> (CashewDocument, Option<PathBuf>, Option<String>) {
@@ -1894,6 +2313,26 @@ fn skip_quoted_text(bytes: &[u8], start: usize) -> usize {
         }
     }
     bytes.len()
+}
+
+async fn run_formula_worker<T, F>(work: F) -> anyhow::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| anyhow::anyhow!("formula worker failed: {error}"))?
+}
+
+fn block_on_formula_worker<T, F>(future: F) -> anyhow::Result<T>
+where
+    F: Future<Output = anyhow::Result<T>>,
+{
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(future)
 }
 
 async fn run_openrouter_request(request: &OpenRouterRequest) -> anyhow::Result<String> {
@@ -2450,6 +2889,20 @@ fn cached_text(document: &CashewDocument, cache_key: &str) -> Option<String> {
     }
 }
 
+fn cached_text_result(document: &CashewDocument, cache_key: &str) -> anyhow::Result<String> {
+    let entry = document
+        .cache
+        .get(cache_key)
+        .ok_or_else(|| anyhow::anyhow!("provider call finished without a cache entry"))?;
+
+    match (&entry.status, &entry.value) {
+        (CacheStatus::Ready, CachedValue::Text(value)) => Ok(value.clone()),
+        (CacheStatus::Failed { message }, _) => anyhow::bail!(message.clone()),
+        (CacheStatus::Ready, _) => anyhow::bail!("provider cache entry did not contain text"),
+        (CacheStatus::Pending, _) => anyhow::bail!("provider cache entry is still pending"),
+    }
+}
+
 fn cached_media_cell_value(document: &CashewDocument, cache_key: &str) -> Option<String> {
     let entry = document.cache.get(cache_key)?;
     if entry.status != CacheStatus::Ready {
@@ -2462,10 +2915,34 @@ fn cached_media_cell_value(document: &CashewDocument, cache_key: &str) -> Option
     }
 }
 
+fn cached_media_asset_result(
+    document: &CashewDocument,
+    cache_key: &str,
+) -> anyhow::Result<MediaAsset> {
+    let entry = document
+        .cache
+        .get(cache_key)
+        .ok_or_else(|| anyhow::anyhow!("provider call finished without a cache entry"))?;
+
+    match (&entry.status, &entry.value) {
+        (CacheStatus::Ready, CachedValue::MediaAsset(asset)) => Ok(asset.clone()),
+        (CacheStatus::Failed { message }, _) => anyhow::bail!(message.clone()),
+        (CacheStatus::Ready, _) => anyhow::bail!("provider cache entry did not contain media"),
+        (CacheStatus::Pending, _) => anyhow::bail!("provider cache entry is still pending"),
+    }
+}
+
 fn openrouter_pending_message(mode: LlmOutputMode) -> &'static str {
     match mode {
         LlmOutputMode::Text => "Running LLM...",
         LlmOutputMode::ListDown | LlmOutputMode::ListRight => "Running LLM list...",
+    }
+}
+
+fn openrouter_waiting_message(mode: LlmOutputMode) -> &'static str {
+    match mode {
+        LlmOutputMode::Text => "Waiting for matching LLM call...",
+        LlmOutputMode::ListDown | LlmOutputMode::ListRight => "Waiting for matching LLM list...",
     }
 }
 
@@ -2694,6 +3171,53 @@ mod tests {
                 .cell(0, 0)
                 .map(|cell| &cell.value),
             Some(CellValue::FormulaPending { message }) if message == "Running image generation..."
+        ));
+    }
+
+    #[test]
+    fn matching_running_provider_call_is_reused_by_other_cells() {
+        let mut state = AppState::new();
+        let formula = r#"=GENERATEIMAGE("A cat", "flux/dev")"#.to_string();
+        state
+            .document
+            .sheet_mut()
+            .set_cell_input(0, 0, formula.clone());
+        state
+            .document
+            .sheet_mut()
+            .set_cell_input(0, 1, formula.clone());
+
+        let first = state
+            .prepare_generate_image_for_cell(0, 0, false)
+            .expect("first image formula should start");
+        let second = state.prepare_generate_image_for_cell(0, 1, false);
+
+        assert!(second.is_none());
+        assert_eq!(state.network_calls.len(), 1);
+        assert_eq!(state.in_flight_provider_calls.len(), 1);
+        assert!(matches!(
+            state.document.sheet().cell(0, 1).map(|cell| &cell.value),
+            Some(CellValue::FormulaPending { message })
+                if message == "Waiting for matching image generation..."
+        ));
+
+        let (row, col, input, cache_key, _, _) = first;
+        state.finish_generate_image_for_cell(
+            row,
+            col,
+            input,
+            cache_key,
+            Ok(test_image_asset("https://example.com/cat.png", 100, 100)),
+        );
+
+        assert!(state.in_flight_provider_calls.is_empty());
+        assert!(matches!(
+            state.document.sheet().cell(0, 0).map(|cell| &cell.value),
+            Some(CellValue::Cached(value)) if value == "https://example.com/cat.png"
+        ));
+        assert!(matches!(
+            state.document.sheet().cell(0, 1).map(|cell| &cell.value),
+            Some(CellValue::Cached(value)) if value == "https://example.com/cat.png"
         ));
     }
 

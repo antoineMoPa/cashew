@@ -39,7 +39,8 @@ Easy
  - js-like scripting with formula calls, http requests, etc.
 - sound playback
 - update current formula when changing models in docs
-
+- Insert rows / columns between existing
+- Text with minimal formating (ex: headings)
 
 ## Papercuts
  - triple click formula in docs selects page content - should select just <pre/

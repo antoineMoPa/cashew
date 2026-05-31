@@ -474,6 +474,7 @@ dependencies = [
  "serde_json",
  "serde_json_path",
  "sha2",
+ "tokio",
 ]
 
 [[package]]
