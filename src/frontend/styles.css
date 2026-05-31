@@ -352,10 +352,6 @@ input {
     box-shadow: 0 14px 28px rgba(18, 126, 102, 0.24);
 }
 
-.formula-approval-button.active:hover {
-    transform: translateY(-1px);
-}
-
 .formula-input {
     position: relative;
     z-index: 2;

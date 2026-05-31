@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     future::Future,
     path::{Path, PathBuf},
@@ -17,11 +17,11 @@ use crate::backend::cache::{
     CacheEntry, CacheStatus, CachedValue, MediaAsset, MediaType, stable_cache_key,
 };
 use crate::backend::document::{CashewDocument, Cell, CellValue, Sheet, cell_key, column_name};
-use crate::backend::fill::FillRange;
+use crate::backend::fill::{FillRange, formula_references};
 use crate::backend::formula_implementations::{
     LlmOutputMode, LlmRequest, concatenate_video_inputs_for_sheet,
     generate_image_request_for_sheet, generate_video_request_for_sheet, llm_request_for_sheet,
-    segment_request_for_sheet,
+    parse_cell_reference, segment_request_for_sheet,
 };
 use crate::backend::formulas::FormulaFunction;
 use crate::backend::providers::fal_image::{FalImageClient, GenerateImageRequest};
@@ -257,6 +257,7 @@ impl AppState {
             next_network_call_id: 1,
             next_toast_id: 1,
         };
+        state.validate_cached_provider_graph(CachedProviderValidationScope::LocalDerivedOnly);
         state.rebuild_pending_provider_calls_from_document();
         state
     }
@@ -514,6 +515,78 @@ impl AppState {
         self.in_flight_provider_calls.clear();
     }
 
+    fn validate_cached_provider_graph(&mut self, scope: CachedProviderValidationScope) {
+        let cells = self
+            .document
+            .sheet()
+            .cells
+            .keys()
+            .filter_map(|key| parse_cell_reference(key).ok())
+            .collect::<Vec<_>>();
+        self.validate_cached_provider_cells(cells, scope);
+    }
+
+    fn validate_cached_provider_graph_from_cell(&mut self, row: usize, col: usize) {
+        let reverse_dependencies = provider_reverse_dependencies(self.document.sheet());
+        let mut queue = VecDeque::from([(row, col)]);
+        let mut seen = BTreeSet::new();
+        let mut cells = Vec::new();
+
+        while let Some(cell) = queue.pop_front() {
+            let Some(dependents) = reverse_dependencies.get(&cell) else {
+                continue;
+            };
+
+            for dependent in dependents {
+                if !seen.insert(*dependent) {
+                    continue;
+                }
+                cells.push(*dependent);
+                queue.push_back(*dependent);
+            }
+        }
+
+        self.validate_cached_provider_cells(cells, CachedProviderValidationScope::All);
+    }
+
+    fn validate_cached_provider_cells(
+        &mut self,
+        cells: Vec<(usize, usize)>,
+        scope: CachedProviderValidationScope,
+    ) {
+        let mut invalidated = 0usize;
+
+        for (row, col) in cells {
+            let Some(action) = cached_provider_validation_action(&self.document, row, col) else {
+                continue;
+            };
+            if !scope.allows(action) {
+                continue;
+            }
+
+            let Some(cell) = self.document.sheet().cell(row, col) else {
+                continue;
+            };
+            let input = cell.input.clone();
+            self.document.sheet_mut().set_cell_value_with_cache(
+                row,
+                col,
+                input,
+                CellValue::FormulaPending {
+                    message: action.pending_message().to_string(),
+                },
+                None,
+            );
+            invalidated += 1;
+        }
+
+        if invalidated > 0 {
+            self.document.sheet_mut().recalculate_formulas();
+            self.dirty = true;
+            self.status = format!("Queued {invalidated} stale cached provider formulas");
+        }
+    }
+
     pub(crate) fn prepare_llm_for_cell(
         &mut self,
         row: usize,
@@ -535,7 +608,7 @@ impl AppState {
 
         let input = cell.input.clone();
         let request = llm_request_for_sheet(&input, sheet).ok().flatten()?;
-        let cache_key = llm_cache_key(&input, &request.request);
+        let cache_key = llm_cache_key(&input, sheet, &request.request);
 
         if let Some(cached) = cached_text(&self.document, &cache_key) {
             self.document.finish_openrouter_for_cell(
@@ -632,7 +705,7 @@ impl AppState {
                 return None;
             }
         };
-        let cache_key = generate_image_cache_key(&input, &request);
+        let cache_key = generate_image_cache_key(&input, sheet, &request);
 
         if let Some(cached) = cached_media_cell_value(&self.document, &cache_key) {
             self.document.sheet_mut().set_cell_value_with_cache(
@@ -736,7 +809,7 @@ impl AppState {
                 return None;
             }
         };
-        let cache_key = generate_video_cache_key(&input, &request);
+        let cache_key = generate_video_cache_key(&input, sheet, &request);
 
         if let Some(cached) = cached_media_cell_value(&self.document, &cache_key) {
             self.document.sheet_mut().set_cell_value_with_cache(
@@ -840,7 +913,7 @@ impl AppState {
                 return None;
             }
         };
-        let cache_key = segment_cache_key(&input, &request);
+        let cache_key = segment_cache_key(&input, sheet, &request);
 
         if let Some(cached) = cached_media_cell_value(&self.document, &cache_key) {
             self.document.sheet_mut().set_cell_value_with_cache(
@@ -942,7 +1015,7 @@ impl AppState {
                 return None;
             }
         };
-        let cache_key = concatenate_video_cache_key(&input, &video_inputs);
+        let cache_key = concatenate_video_cache_key(&input, sheet, &video_inputs);
 
         if let Some(cached) = cached_media_cell_value(&self.document, &cache_key) {
             self.document.sheet_mut().set_cell_value_with_cache(
@@ -1014,6 +1087,7 @@ impl AppState {
             result,
         );
         self.finish_waiting_provider_cells(&cache_key);
+        self.validate_cached_provider_graph_from_cell(row, col);
         self.dirty = true;
     }
 
@@ -1027,7 +1101,8 @@ impl AppState {
     ) {
         let mut media_dimensions = None;
         let value = match result {
-            Ok(asset) => {
+            Ok(mut asset) => {
+                attach_media_call_parameters(&mut asset, &input, self.document.sheet());
                 media_dimensions = media_dimensions_from_metadata(&asset.metadata);
                 let uri = asset.uri.clone();
                 self.document.cache.insert(
@@ -1076,6 +1151,7 @@ impl AppState {
             sheet.recalculate_formulas();
         }
         self.finish_waiting_provider_cells(&cache_key);
+        self.validate_cached_provider_graph_from_cell(row, col);
         self.dirty = true;
     }
 
@@ -1089,7 +1165,8 @@ impl AppState {
     ) {
         let mut media_dimensions = None;
         let value = match result {
-            Ok(asset) => {
+            Ok(mut asset) => {
+                attach_media_call_parameters(&mut asset, &input, self.document.sheet());
                 media_dimensions = media_dimensions_from_metadata(&asset.metadata);
                 let uri = asset.uri.clone();
                 self.document.cache.insert(
@@ -1138,6 +1215,7 @@ impl AppState {
             sheet.recalculate_formulas();
         }
         self.finish_waiting_provider_cells(&cache_key);
+        self.validate_cached_provider_graph_from_cell(row, col);
         self.dirty = true;
     }
 
@@ -1151,7 +1229,8 @@ impl AppState {
     ) {
         let mut media_dimensions = None;
         let value = match result {
-            Ok(asset) => {
+            Ok(mut asset) => {
+                attach_media_call_parameters(&mut asset, &input, self.document.sheet());
                 media_dimensions = media_dimensions_from_metadata(&asset.metadata);
                 let uri = asset.uri.clone();
                 self.document.cache.insert(
@@ -1200,6 +1279,7 @@ impl AppState {
             sheet.recalculate_formulas();
         }
         self.finish_waiting_provider_cells(&cache_key);
+        self.validate_cached_provider_graph_from_cell(row, col);
         self.dirty = true;
     }
 
@@ -1213,7 +1293,8 @@ impl AppState {
     ) {
         let mut media_dimensions = None;
         let value = match result {
-            Ok(asset) => {
+            Ok(mut asset) => {
+                attach_media_call_parameters(&mut asset, &input, self.document.sheet());
                 media_dimensions = media_dimensions_from_metadata(&asset.metadata);
                 let uri = asset.uri.clone();
                 self.document.cache.insert(
@@ -1262,6 +1343,7 @@ impl AppState {
             sheet.recalculate_formulas();
         }
         self.finish_waiting_provider_cells(&cache_key);
+        self.validate_cached_provider_graph_from_cell(row, col);
         self.dirty = true;
     }
 
@@ -1460,6 +1542,9 @@ impl AppState {
                 self.fill_dragging = None;
                 self.status = format!("Opened {}", path.display());
                 self.set_selected_cell(0, 0);
+                self.validate_cached_provider_graph(
+                    CachedProviderValidationScope::LocalDerivedOnly,
+                );
                 self.rebuild_pending_provider_calls_from_document();
             }
             Err(error) => {
@@ -2853,28 +2938,157 @@ fn escape_ffmpeg_concat_path(path: &Path) -> String {
     path.to_string_lossy().replace('\'', "'\\''")
 }
 
-fn llm_cache_key(input: &str, request: &OpenRouterRequest) -> String {
+fn llm_cache_key(input: &str, sheet: &Sheet, request: &OpenRouterRequest) -> String {
     let request_json = serde_json::to_string(request).unwrap_or_else(|_| request.prompt.clone());
-    stable_cache_key(input, &[request_json])
+    stable_cache_key(
+        "provider-call",
+        &formula_call_parameters(input, sheet, request_json),
+    )
 }
 
-fn generate_image_cache_key(input: &str, request: &GenerateImageRequest) -> String {
+fn generate_image_cache_key(input: &str, sheet: &Sheet, request: &GenerateImageRequest) -> String {
     let request_json = serde_json::to_string(request).unwrap_or_else(|_| request.prompt.clone());
-    stable_cache_key(input, &[request_json])
+    stable_cache_key(
+        "provider-call",
+        &formula_call_parameters(input, sheet, request_json),
+    )
 }
 
-fn generate_video_cache_key(input: &str, request: &GenerateVideoRequest) -> String {
+fn generate_video_cache_key(input: &str, sheet: &Sheet, request: &GenerateVideoRequest) -> String {
     let request_json = serde_json::to_string(request).unwrap_or_else(|_| request.prompt.clone());
-    stable_cache_key(input, &[request_json])
+    stable_cache_key(
+        "provider-call",
+        &formula_call_parameters(input, sheet, request_json),
+    )
 }
 
-fn segment_cache_key(input: &str, request: &SegmentImageRequest) -> String {
+fn segment_cache_key(input: &str, sheet: &Sheet, request: &SegmentImageRequest) -> String {
     let request_json = serde_json::to_string(request).unwrap_or_else(|_| request.prompt.clone());
-    stable_cache_key(input, &[request_json])
+    stable_cache_key(
+        "provider-call",
+        &formula_call_parameters(input, sheet, request_json),
+    )
 }
 
-fn concatenate_video_cache_key(input: &str, video_inputs: &[String]) -> String {
-    stable_cache_key(input, video_inputs)
+fn concatenate_video_cache_key(input: &str, sheet: &Sheet, video_inputs: &[String]) -> String {
+    let input_json =
+        serde_json::to_string(video_inputs).unwrap_or_else(|_| video_inputs.join("\n"));
+    stable_cache_key(
+        "provider-call",
+        &formula_call_parameters(input, sheet, input_json),
+    )
+}
+
+fn attach_media_call_parameters(asset: &mut MediaAsset, input: &str, sheet: &Sheet) {
+    let Some(call_parameters) = media_call_parameters_for_input(input, sheet) else {
+        return;
+    };
+
+    if let Some(metadata) = asset.metadata.as_object_mut() {
+        metadata.insert(
+            "call_parameters".to_string(),
+            serde_json::Value::Array(
+                call_parameters
+                    .into_iter()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+    }
+}
+
+fn media_call_parameters_for_input(input: &str, sheet: &Sheet) -> Option<Vec<String>> {
+    if let Some(request) = generate_image_request_for_sheet(input, sheet)
+        .ok()
+        .flatten()
+    {
+        let request_json =
+            serde_json::to_string(&request).unwrap_or_else(|_| request.prompt.clone());
+        return Some(formula_call_parameters(input, sheet, request_json));
+    }
+
+    if let Some(request) = generate_video_request_for_sheet(input, sheet)
+        .ok()
+        .flatten()
+    {
+        let request_json =
+            serde_json::to_string(&request).unwrap_or_else(|_| request.prompt.clone());
+        return Some(formula_call_parameters(input, sheet, request_json));
+    }
+
+    if let Some(request) = segment_request_for_sheet(input, sheet).ok().flatten() {
+        let request_json =
+            serde_json::to_string(&request).unwrap_or_else(|_| request.prompt.clone());
+        return Some(formula_call_parameters(input, sheet, request_json));
+    }
+
+    if let Some(video_inputs) = concatenate_video_inputs_for_sheet(input, sheet)
+        .ok()
+        .flatten()
+    {
+        let input_json =
+            serde_json::to_string(&video_inputs).unwrap_or_else(|_| video_inputs.join("\n"));
+        return Some(formula_call_parameters(input, sheet, input_json));
+    }
+
+    None
+}
+
+fn formula_call_parameters(input: &str, sheet: &Sheet, fallback: String) -> Vec<String> {
+    let references = formula_references(input);
+    let mut parameters = vec![format!(
+        "formula:{}",
+        formula_cache_expression(input, &references)
+    )];
+    if references.is_empty() {
+        parameters.push(format!("request:{fallback}"));
+        return parameters;
+    }
+
+    parameters.extend(references.into_iter().map(|reference| {
+        let Some(cell) = sheet.cell(reference.row, reference.col) else {
+            return "missing-cell".to_string();
+        };
+
+        if let Some(cache_key) = cell.cache_key.as_deref() {
+            return format!("cached-cell:{cache_key}");
+        }
+
+        match &cell.value {
+            CellValue::Empty => "empty-cell".to_string(),
+            CellValue::Text(value) | CellValue::Cached(value) => {
+                format!("cell-value:{value}")
+            }
+            CellValue::FormulaPending { message } => {
+                format!("pending-cell:{message}")
+            }
+            CellValue::Error(error) => format!("error-cell:{error}"),
+        }
+    }));
+    parameters
+}
+
+fn formula_cache_expression(
+    input: &str,
+    references: &[crate::backend::fill::FormulaReference],
+) -> String {
+    if references.is_empty() {
+        return input.trim().to_string();
+    }
+
+    let mut expression = String::with_capacity(input.len());
+    let mut index = 0usize;
+    for reference in references {
+        if reference.start > input.len() || reference.end > input.len() || reference.start < index {
+            return input.trim().to_string();
+        }
+
+        expression.push_str(&input[index..reference.start]);
+        expression.push_str("$cell");
+        index = reference.end;
+    }
+    expression.push_str(&input[index..]);
+    expression.trim().to_string()
 }
 
 fn cached_text(document: &CashewDocument, cache_key: &str) -> Option<String> {
@@ -2990,6 +3204,167 @@ fn concatenate_video_cell_is_runnable(value: &CellValue) -> bool {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CachedProviderValidationAction {
+    GenerateImage,
+    GenerateVideo,
+    Segment,
+    ConcatenateVideo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CachedProviderValidationScope {
+    All,
+    LocalDerivedOnly,
+}
+
+impl CachedProviderValidationScope {
+    fn allows(self, action: CachedProviderValidationAction) -> bool {
+        match self {
+            Self::All => true,
+            Self::LocalDerivedOnly => {
+                matches!(action, CachedProviderValidationAction::ConcatenateVideo)
+            }
+        }
+    }
+}
+
+impl CachedProviderValidationAction {
+    fn pending_message(self) -> &'static str {
+        match self {
+            Self::GenerateImage => "fal.image request is ready to run",
+            Self::GenerateVideo => "fal.video request is ready to run",
+            Self::Segment => "fal.segment request is ready to run",
+            Self::ConcatenateVideo => "Local video concatenation is ready to run",
+        }
+    }
+}
+
+fn provider_reverse_dependencies(sheet: &Sheet) -> BTreeMap<(usize, usize), Vec<(usize, usize)>> {
+    let mut dependencies = BTreeMap::<(usize, usize), Vec<(usize, usize)>>::new();
+
+    for (key, cell) in &sheet.cells {
+        let Ok(dependent) = parse_cell_reference(key) else {
+            continue;
+        };
+
+        for reference in formula_references(&cell.input) {
+            dependencies
+                .entry((reference.row, reference.col))
+                .or_default()
+                .push(dependent);
+        }
+    }
+
+    dependencies
+}
+
+fn cached_provider_validation_action(
+    document: &CashewDocument,
+    row: usize,
+    col: usize,
+) -> Option<CachedProviderValidationAction> {
+    let sheet = document.sheet();
+    let cell = sheet.cell(row, col)?;
+    if !matches!(cell.value, CellValue::Cached(_)) {
+        return None;
+    }
+
+    let cache_key = cell.cache_key.as_deref()?;
+    let asset = cached_media_asset(document, cache_key)?;
+    let metadata = &asset.metadata;
+
+    if let Some(current) = media_call_parameters_for_input(&cell.input, sheet) {
+        if let Some(stored) = metadata.get("call_parameters") {
+            let current = serde_json::to_value(current).ok()?;
+            if stored != &current {
+                return cached_provider_action_for_input(&cell.input, sheet);
+            }
+
+            return None;
+        }
+    }
+
+    if let Some(request) = generate_image_request_for_sheet(&cell.input, sheet)
+        .ok()
+        .flatten()
+    {
+        return metadata_value_changed(metadata, "request", &request.input)
+            .then_some(CachedProviderValidationAction::GenerateImage);
+    }
+
+    if let Some(request) = generate_video_request_for_sheet(&cell.input, sheet)
+        .ok()
+        .flatten()
+    {
+        return metadata_value_changed(metadata, "request", &request.input)
+            .then_some(CachedProviderValidationAction::GenerateVideo);
+    }
+
+    if let Some(request) = segment_request_for_sheet(&cell.input, sheet).ok().flatten() {
+        return metadata_value_changed(metadata, "request", &request.input)
+            .then_some(CachedProviderValidationAction::Segment);
+    }
+
+    if let Some(video_inputs) = concatenate_video_inputs_for_sheet(&cell.input, sheet)
+        .ok()
+        .flatten()
+    {
+        let current = serde_json::to_value(video_inputs).ok()?;
+        return metadata_value_changed(metadata, "inputs", &current)
+            .then_some(CachedProviderValidationAction::ConcatenateVideo);
+    }
+
+    None
+}
+
+fn cached_provider_action_for_input(
+    input: &str,
+    sheet: &Sheet,
+) -> Option<CachedProviderValidationAction> {
+    if generate_image_request_for_sheet(input, sheet)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return Some(CachedProviderValidationAction::GenerateImage);
+    }
+
+    if generate_video_request_for_sheet(input, sheet)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return Some(CachedProviderValidationAction::GenerateVideo);
+    }
+
+    if segment_request_for_sheet(input, sheet)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return Some(CachedProviderValidationAction::Segment);
+    }
+
+    if concatenate_video_inputs_for_sheet(input, sheet)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return Some(CachedProviderValidationAction::ConcatenateVideo);
+    }
+
+    None
+}
+
+fn metadata_value_changed(
+    metadata: &serde_json::Value,
+    field: &str,
+    current: &serde_json::Value,
+) -> bool {
+    metadata.get(field).is_some_and(|stored| stored != current)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3059,6 +3434,41 @@ mod tests {
         assert_eq!(
             cached_media_cell_value(&document, "image-key"),
             Some("https://example.com/ref.png".to_string())
+        );
+    }
+
+    #[test]
+    fn provider_cache_key_uses_referenced_cached_cell_identity() {
+        let formula = r#"=GENERATEIMAGE("add a car", "openai/gpt-image-2", A1)"#;
+        let mut first = Sheet::new("First", 2, 2);
+        first.set_cell_value_with_cache(
+            0,
+            0,
+            r#"=GENERATEIMAGE("source", "flux/dev")"#.to_string(),
+            CellValue::Cached("https://example.com/first-source.png".to_string()),
+            Some("source-call-key".to_string()),
+        );
+        let first_request = generate_image_request_for_sheet(formula, &first)
+            .unwrap()
+            .unwrap();
+
+        let moved_formula = r#"=GENERATEIMAGE("add a car", "openai/gpt-image-2", B2)"#;
+        let mut second = Sheet::new("Second", 2, 2);
+        second.set_cell_value_with_cache(
+            1,
+            1,
+            r#"=GENERATEIMAGE("source", "flux/dev")"#.to_string(),
+            CellValue::Cached("https://example.com/second-source.png".to_string()),
+            Some("source-call-key".to_string()),
+        );
+        let second_request = generate_image_request_for_sheet(moved_formula, &second)
+            .unwrap()
+            .unwrap();
+
+        assert_ne!(first_request.input, second_request.input);
+        assert_eq!(
+            generate_image_cache_key(formula, &first, &first_request),
+            generate_image_cache_key(moved_formula, &second, &second_request)
         );
     }
 
@@ -3143,6 +3553,7 @@ mod tests {
     #[test]
     fn queued_provider_calls_can_be_dispatched_later() {
         let mut state = AppState::new();
+        state.new_document();
         state.set_selected_formula(r#"=GENERATEIMAGE("A cat", "flux/dev")"#.to_string());
 
         let work = state
@@ -3177,6 +3588,7 @@ mod tests {
     #[test]
     fn matching_running_provider_call_is_reused_by_other_cells() {
         let mut state = AppState::new();
+        state.new_document();
         let formula = r#"=GENERATEIMAGE("A cat", "flux/dev")"#.to_string();
         state
             .document
@@ -3264,6 +3676,126 @@ mod tests {
     }
 
     #[test]
+    fn cached_concatenate_video_is_invalidated_when_source_video_changed_on_open() {
+        let mut state = AppState::new();
+        state.new_document();
+        let sheet = state.document.sheet_mut();
+        sheet.set_cell_value_with_cache(
+            36,
+            2,
+            r#"=GENERATEVIDEO("prompt", A1)"#.to_string(),
+            CellValue::Cached("https://example.com/new-c37.mp4".to_string()),
+            Some("c37-video-key".to_string()),
+        );
+        sheet.set_cell_value_with_cache(
+            36,
+            3,
+            "https://example.com/d37.mp4".to_string(),
+            CellValue::Text("https://example.com/d37.mp4".to_string()),
+            None,
+        );
+        sheet.set_cell_value_with_cache(
+            36,
+            4,
+            "=CONCATENATEVIDEO(C37, D37)".to_string(),
+            CellValue::Cached("https://example.com/old-concat.mp4".to_string()),
+            Some("old-concat-key".to_string()),
+        );
+        state.document.cache.insert(
+            "old-concat-key".to_string(),
+            CacheEntry {
+                key: "old-concat-key".to_string(),
+                status: CacheStatus::Ready,
+                value: CachedValue::MediaAsset(test_video_asset_with_metadata(
+                    "https://example.com/old-concat.mp4",
+                    serde_json::json!({
+                        "inputs": [
+                            "https://example.com/old-c37.mp4",
+                            "https://example.com/d37.mp4"
+                        ]
+                    }),
+                )),
+            },
+        );
+
+        state.validate_cached_provider_graph(CachedProviderValidationScope::LocalDerivedOnly);
+
+        assert!(matches!(
+            state.document.sheet().cell(36, 4).map(|cell| &cell.value),
+            Some(CellValue::FormulaPending { message })
+                if message == "Local video concatenation is ready to run"
+        ));
+        assert_eq!(
+            state
+                .document
+                .sheet()
+                .cell(36, 4)
+                .and_then(|cell| cell.cache_key.as_deref()),
+            None
+        );
+    }
+
+    #[test]
+    fn finishing_source_video_invalidates_cached_concatenate_video_dependent() {
+        let mut state = AppState::new();
+        state.new_document();
+        let sheet = state.document.sheet_mut();
+        sheet.set_cell_value_with_cache(
+            36,
+            2,
+            r#"=GENERATEVIDEO("prompt", A1)"#.to_string(),
+            CellValue::FormulaPending {
+                message: "Running video generation...".to_string(),
+            },
+            Some("c37-video-key".to_string()),
+        );
+        sheet.set_cell_value_with_cache(
+            36,
+            3,
+            "https://example.com/d37.mp4".to_string(),
+            CellValue::Text("https://example.com/d37.mp4".to_string()),
+            None,
+        );
+        sheet.set_cell_value_with_cache(
+            36,
+            4,
+            "=CONCATENATEVIDEO(C37, D37)".to_string(),
+            CellValue::Cached("https://example.com/old-concat.mp4".to_string()),
+            Some("old-concat-key".to_string()),
+        );
+        state.document.cache.insert(
+            "old-concat-key".to_string(),
+            CacheEntry {
+                key: "old-concat-key".to_string(),
+                status: CacheStatus::Ready,
+                value: CachedValue::MediaAsset(test_video_asset_with_metadata(
+                    "https://example.com/old-concat.mp4",
+                    serde_json::json!({
+                        "inputs": [
+                            "https://example.com/old-c37.mp4",
+                            "https://example.com/d37.mp4"
+                        ]
+                    }),
+                )),
+            },
+        );
+
+        state.finish_generate_video_for_cell(
+            36,
+            2,
+            r#"=GENERATEVIDEO("prompt", A1)"#.to_string(),
+            "c37-video-key".to_string(),
+            Ok(test_video_asset("https://example.com/new-c37.mp4")),
+        );
+
+        assert!(matches!(
+            state.document.sheet().cell(36, 4).map(|cell| &cell.value),
+            Some(CellValue::FormulaPending { message })
+                if message == "Local video concatenation is ready to run"
+        ));
+    }
+
+    #[test]
     fn failed_network_calls_store_error_output_for_the_network_panel() {
         let mut state = AppState::new();
         let request = GenerateImageRequest::new(
@@ -3327,6 +3859,28 @@ mod tests {
                     }]
                 }
             }),
+        }
+    }
+
+    fn test_video_asset(uri: &str) -> MediaAsset {
+        test_video_asset_with_metadata(
+            uri,
+            serde_json::json!({
+                "request": {
+                    "prompt": "prompt",
+                    "image_url": "https://example.com/start.png"
+                }
+            }),
+        )
+    }
+
+    fn test_video_asset_with_metadata(uri: &str, metadata: serde_json::Value) -> MediaAsset {
+        MediaAsset {
+            provider: "fal.video".to_string(),
+            media_type: MediaType::Video,
+            uri: uri.to_string(),
+            data_uri: None,
+            metadata,
         }
     }
 
